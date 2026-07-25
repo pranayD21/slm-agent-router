@@ -9,4 +9,5 @@ dist/
 reports/
 runs/
 results/
+benchmark_runs/
 scores.json

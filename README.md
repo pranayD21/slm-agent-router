@@ -39,6 +39,25 @@ export OLLAMA_BASE_URL="http://127.0.0.1:11434"
 
 The OpenAI and Claude comparison agents use the same browser tool surface as the cascade agent, so the timing comparison measures the end-to-end browser task loop: model decision latency plus browser action latency.
 
+## GameWorld benchmark dashboard
+
+The web UI includes a GameWorld benchmark tab that graphically compares the SLM Cascade, OpenAI, and Claude agents across game-agent metrics:
+
+- pass rate and average score
+- median completion time
+- total token cost and cost per successful task
+- per-game score/cost tiles
+- representative SLM-vs-LLM route timelines
+
+By default, the dashboard ships with a normalized demo report so the visualization is usable immediately. To show real GameWorld results, write a report to `benchmark_runs/gameworld_results.json` or point the app at one:
+
+```bash
+export SLM_ROUTER_GAMEWORLD_RESULTS="/path/to/gameworld_results.json"
+slm-router serve --host 127.0.0.1 --port 8000
+```
+
+The importer accepts either the dashboard-native shape with `models` and `games`, or flat run logs with fields such as `model`, `game`, `passed`, `score`, `elapsed_s`, `total_tokens`, and `estimated_cost_usd`.
+
 ### Cascade reliability tuning
 
 The cascade keeps its speed edge by using local policy for cheap browser moves and escalating only when the local path looks risky:
@@ -46,9 +65,23 @@ The cascade keeps its speed edge by using local policy for cheap browser moves a
 - Fast local plan is emitted before actions, so the UI shows the intended route.
 - Non-final navigation actions use a lower local confidence threshold for speed.
 - Final answers use a higher threshold plus checks that reject premature finishes, search-result snippets, empty answers, and blocked pages.
+- Search-result links are opened by direct URL when possible, avoiding slower and more fragile browser clicks.
+- Source pages that already contain enough evidence are marked ready for synthesis, so the fallback LLM answers instead of browsing deeper.
 - Failed clicks/fills are recorded as observations so the next step can recover instead of crashing the run.
 - Generic search tasks use Brave Search first, then lighter alternate routes, avoiding Google/Bing unless the prompt explicitly names them.
 - CAPTCHA, unusual-traffic, and bot-protection pages are detected. The runner switches route when possible and marks the run as `blocked` rather than pretending it succeeded.
+
+The default cascade profile was selected from a 20-epoch tuning run across direct navigation, search, and synthesis tasks:
+
+- `SLM_ROUTER_CONFIDENCE_THRESHOLD=0.52`
+- `SLM_ROUTER_FINISH_CONFIDENCE_THRESHOLD=0.84`
+- Winning profile: `100%` judged pass rate, `0.99` average judge score, `3.43s` median elapsed time, and `2,645` average action LLM tokens.
+
+You can rerun the tuning suite locally:
+
+```bash
+python3 scripts/tune_cascade.py --epochs 20 --timeout 60 --output benchmark_runs/cascade_tuning_latest.json
+```
 
 ## Public deployment
 
@@ -71,7 +104,9 @@ export SLM_ROUTER_ALLOW_SERVER_KEYS=true
 # Cost and abuse controls.
 export SLM_ROUTER_MAX_ACTIVE_RUNS=3
 export SLM_ROUTER_RUNS_PER_HOUR=20
-export SLM_ROUTER_MAX_STEPS=15
+export SLM_ROUTER_AGENT_TIMEOUT_SECONDS=75
+export SLM_ROUTER_CONFIDENCE_THRESHOLD=0.52
+export SLM_ROUTER_FINISH_CONFIDENCE_THRESHOLD=0.84
 ```
 
 Visitors can also paste OpenAI or Anthropic API keys in the UI for a single run. Those keys are sent only with that run request and are not written to disk by the app.

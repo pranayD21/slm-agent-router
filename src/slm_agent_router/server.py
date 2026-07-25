@@ -11,6 +11,7 @@ from typing import Any
 
 from starlette.requests import Request
 
+from .gameworld import gameworld_report
 from .web_benchmark import build_agent_configs, provider_status, run_benchmark
 
 
@@ -24,7 +25,7 @@ class BenchmarkManager:
         self.active_runs = 0
         self.max_active_runs = int(os.getenv("SLM_ROUTER_MAX_ACTIVE_RUNS", "3"))
         self.runs_per_hour = int(os.getenv("SLM_ROUTER_RUNS_PER_HOUR", "20"))
-        self.max_steps = int(os.getenv("SLM_ROUTER_MAX_STEPS", "15"))
+        self.agent_timeout_s = int(os.getenv("SLM_ROUTER_AGENT_TIMEOUT_SECONDS", "75"))
         self.allow_server_keys = os.getenv("SLM_ROUTER_ALLOW_SERVER_KEYS", "true").lower() != "false"
 
     async def start(self, payload: dict[str, Any], client_ip: str = "unknown") -> str:
@@ -67,8 +68,8 @@ class BenchmarkManager:
                     normalize_start_url(payload.get("start_url")),
                     configs,
                     emit,
-                    max_steps=max(1, min(int(payload.get("max_steps") or 12), self.max_steps)),
                     headless=True,
+                    timeout_s=self.agent_timeout_s,
                 )
                 self.runs[run_id]["results"] = results
             except Exception as exc:
@@ -145,10 +146,14 @@ def create_app():
         data["limits"] = {
             "max_active_runs": manager.max_active_runs,
             "runs_per_hour": manager.runs_per_hour,
-            "max_steps": manager.max_steps,
+            "agent_timeout_s": manager.agent_timeout_s,
             "allow_server_keys": manager.allow_server_keys,
         }
         return JSONResponse(data)
+
+    @app.get("/api/gameworld")
+    async def gameworld():
+        return JSONResponse(gameworld_report())
 
     @app.post("/api/runs")
     async def start_run(payload: dict[str, Any], request: Request):

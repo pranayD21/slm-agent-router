@@ -3,6 +3,12 @@ const summary = document.querySelector("#summary");
 const runButton = document.querySelector("#run");
 const total = document.querySelector("#run-total");
 const template = document.querySelector("#agent-template");
+const modeTabs = Array.from(document.querySelectorAll(".mode-tab"));
+const views = Array.from(document.querySelectorAll(".view"));
+const gameworldCards = document.querySelector("#gameworld-cards");
+const gameworldSource = document.querySelector("#gameworld-source");
+const gameGrid = document.querySelector("#game-grid");
+const traceLanes = document.querySelector("#trace-lanes");
 const panels = new Map();
 let eventSource = null;
 let timers = new Map();
@@ -20,11 +26,6 @@ async function loadConfig() {
   const response = await fetch("/api/config");
   const config = await response.json();
   serverConfig = config;
-  if (config.limits && config.limits.max_steps) {
-    const maxSteps = document.querySelector("#max-steps");
-    maxSteps.max = config.limits.max_steps;
-    maxSteps.value = Math.min(Number(maxSteps.value), config.limits.max_steps);
-  }
   for (const [id, data] of Object.entries(config)) {
     if (id === "limits") continue;
     const model = document.querySelector(`#model-${id}`);
@@ -36,6 +37,23 @@ async function loadConfig() {
       input.closest("label").title = data.enabled ? data.model : data.hint;
     }
   }
+}
+
+async function loadGameWorld() {
+  const response = await fetch("/api/gameworld");
+  const report = await response.json();
+  renderGameWorld(report);
+}
+
+function initializeTabs() {
+  modeTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.view;
+      modeTabs.forEach((item) => item.classList.toggle("active", item === tab));
+      views.forEach((view) => view.classList.toggle("active", view.id === target));
+      total.textContent = target === "gameworld-view" ? "GameWorld" : "Idle";
+    });
+  });
 }
 
 function selectedAgents() {
@@ -58,6 +76,8 @@ function createPanel(agentId) {
     timer: node.querySelector(".timer"),
     steps: node.querySelector(".steps"),
     badge: node.querySelector(".badge"),
+    routing: node.querySelector(".routing-summary"),
+    routeCounts: { slm: 0, llm: 0, safety: 0, unavailable: 0, unknown: 0 },
     viewport: node.querySelector(".viewport"),
     image: node.querySelector("img"),
     title: node.querySelector(".page-title"),
@@ -105,7 +125,6 @@ async function startRun() {
   const payload = {
     task: document.querySelector("#task").value,
     start_url: document.querySelector("#start-url").value,
-    max_steps: Number(document.querySelector("#max-steps").value || 12),
     agents,
     provider_keys: {
       openai: document.querySelector("#openai-key").value,
@@ -171,7 +190,8 @@ function addPlan(event) {
   if (!panel) return;
   const item = document.createElement("li");
   const items = (event.items || []).map((part) => escapeHtml(part)).join(" ");
-  item.innerHTML = `<b>plan</b> ${items}<small>${escapeHtml(event.strategy || "")}</small>`;
+  const subtasks = (event.subtasks || []).map((part) => escapeHtml(part)).join(" → ");
+  item.innerHTML = `<b>plan</b> ${items}<small>${escapeHtml(event.strategy || "")}${subtasks ? ` · ${subtasks}` : ""}</small>`;
   panel.log.appendChild(item);
   panel.log.scrollTop = panel.log.scrollHeight;
 }
@@ -181,10 +201,17 @@ function addAction(event) {
   if (!panel) return;
   panel.steps.textContent = `${event.step} step${event.step === 1 ? "" : "s"}`;
   const action = event.action || {};
+  const route = routeDetails(event);
+  updateRouteCounters(panel, route.kind);
   const item = document.createElement("li");
   const target = action.target || action.selector || action.text || "";
-  item.innerHTML = `<b>${escapeHtml(action.action || "action")}</b> ${escapeHtml(shorten(target, 80))}
-    <small>${escapeHtml(event.reason || "")}${event.routed_from ? ` · ${escapeHtml(event.routed_from)}` : ""} · ${event.llm_latency_ms}ms</small>`;
+  const latency = event.decision_latency_ms ?? event.llm_latency_ms;
+  const detail = [event.reason, route.detail, latency === undefined ? "" : `${latency}ms`]
+    .filter(Boolean)
+    .join(" · ");
+  item.classList.add(`route-${route.kind}`);
+  item.innerHTML = `<span class="step-line"><span class="route-chip ${route.kind}">${escapeHtml(route.label)}</span><b>${escapeHtml(action.action || "action")}</b><span class="step-target">${escapeHtml(shorten(target, 80))}</span></span>
+    <small>${escapeHtml(detail)}</small>`;
   panel.log.appendChild(item);
   panel.log.scrollTop = panel.log.scrollHeight;
 }
@@ -238,9 +265,195 @@ function finishRunButton() {
   if (totalTimer) window.clearInterval(totalTimer);
 }
 
+function renderGameWorld(report) {
+  const models = report.models || [];
+  const games = report.games || [];
+  const winner = models.find((model) => model.id === report.summary?.winner) || bestBy(models, "pass_rate");
+  gameworldSource.textContent = `${report.mode === "demo" ? "Demo report" : "Imported report"} · ${report.summary?.games || games.length} games · ${report.summary?.tasks || 0} tasks`;
+  gameworldCards.innerHTML = [
+    metricCard("Leader", winner?.label || "n/a", `${formatPercent(winner?.pass_rate || 0)} pass rate`),
+    metricCard("Best cost per win", cheapestModel(models)?.label || "n/a", `$${formatMoney(cheapestModel(models)?.cost_per_success_usd || 0)}`),
+    metricCard("Fastest median", fastestModel(models)?.label || "n/a", `${formatNumber(fastestModel(models)?.median_time_s || 0)}s`),
+    metricCard("Most local actions", "SLM Cascade", `${formatNumber(models.find((model) => model.id === "cascade")?.slm_actions || 0)} SLM actions`),
+  ].join("");
+
+  renderBarChart("#pass-chart", models, "pass_rate", { suffix: "%", scale: 100, higherIsBetter: true });
+  renderBarChart("#time-chart", models, "median_time_s", { suffix: "s", higherIsBetter: false });
+  renderBarChart("#cost-chart", models, "estimated_cost_usd", { prefix: "$", higherIsBetter: false });
+  renderBarChart("#cost-success-chart", models, "cost_per_success_usd", { prefix: "$", higherIsBetter: false });
+  renderGameGrid(games, models);
+  renderTraceLanes(report.traces || [], models);
+}
+
+function metricCard(label, value, subtext) {
+  return `<article class="scorecard"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(subtext)}</small></article>`;
+}
+
+function renderBarChart(selector, models, key, options = {}) {
+  const node = document.querySelector(selector);
+  if (!node) return;
+  const values = models.map((model) => Number(model[key] || 0));
+  const max = Math.max(...values, 0.001);
+  node.innerHTML = models
+    .map((model) => {
+      const raw = Number(model[key] || 0);
+      const width = Math.max(4, (raw / max) * 100);
+      const display = formatChartValue(raw, options);
+      return `<div class="bar-row" data-model="${escapeHtml(model.id)}">
+        <div class="bar-label"><span>${escapeHtml(model.label)}</span><b>${escapeHtml(display)}</b></div>
+        <div class="bar-track"><span style="width:${width.toFixed(2)}%"></span></div>
+      </div>`;
+    })
+    .join("");
+}
+
+function renderGameGrid(games, models) {
+  gameGrid.innerHTML = games
+    .map((game) => {
+      const rows = models
+        .map((model) => {
+          const score = Number(game.scores?.[model.id] || 0);
+          const cost = Number(game.cost_usd?.[model.id] || 0);
+          return `<div class="game-score" data-model="${escapeHtml(model.id)}">
+            <span>${escapeHtml(model.label)}</span>
+            <div class="mini-track"><i style="width:${Math.max(3, score * 100).toFixed(2)}%"></i></div>
+            <b>${formatPercent(score)}</b>
+            <small>$${formatMoney(cost)}</small>
+          </div>`;
+        })
+        .join("");
+      return `<article class="game-card">
+        <div class="game-card-head">
+          <div><h2>${escapeHtml(game.name)}</h2><p>${escapeHtml(game.task || "")}</p></div>
+          <span>${escapeHtml(game.genre || "Game")}</span>
+        </div>
+        ${rows}
+      </article>`;
+    })
+    .join("");
+}
+
+function renderTraceLanes(traces, models) {
+  const maxEnd = Math.max(...traces.map((trace) => Number(trace.start || 0) + Number(trace.duration || 0)), 1);
+  traceLanes.innerHTML = models
+    .map((model) => {
+      const items = traces
+        .filter((trace) => trace.model === model.id)
+        .map((trace) => {
+          const left = (Number(trace.start || 0) / maxEnd) * 100;
+          const width = Math.max(2, (Number(trace.duration || 0) / maxEnd) * 100);
+          const kind = normalizeRouteKind(trace.kind || "llm");
+          return `<span class="trace-segment ${kind}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%" title="${escapeHtml(trace.label || "")}">${escapeHtml(trace.label || "")}</span>`;
+        })
+        .join("");
+      return `<div class="trace-lane">
+        <div class="trace-label">${escapeHtml(model.label)}</div>
+        <div class="trace-track">${items}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+function bestBy(rows, key) {
+  return [...rows].sort((a, b) => Number(b[key] || 0) - Number(a[key] || 0))[0];
+}
+
+function cheapestModel(rows) {
+  return [...rows].sort((a, b) => Number(a.cost_per_success_usd || Infinity) - Number(b.cost_per_success_usd || Infinity))[0];
+}
+
+function fastestModel(rows) {
+  return [...rows].sort((a, b) => Number(a.median_time_s || Infinity) - Number(b.median_time_s || Infinity))[0];
+}
+
+function formatChartValue(value, options) {
+  if (options.prefix === "$") return `$${formatMoney(value)}`;
+  if (options.suffix === "%") return formatPercent(value);
+  if (options.suffix) return `${formatNumber(value)}${options.suffix}`;
+  return formatNumber(value);
+}
+
+function formatPercent(value) {
+  return `${Math.round(Number(value || 0) * 100)}%`;
+}
+
+function formatMoney(value) {
+  const number = Number(value || 0);
+  return number < 1 ? number.toFixed(3) : number.toFixed(2);
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
 function shorten(value, limit) {
   const text = String(value || "");
   return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
+}
+
+function routeDetails(event) {
+  const rawKind = String(event.route_kind || "").toLowerCase();
+  const rawRoute = String(event.routed_from || "");
+  const kind = normalizeRouteKind(rawKind || inferRouteKind(event.agent_id, rawRoute));
+  const label = event.route_label || defaultRouteLabel(kind, rawRoute);
+  const reasons = Array.isArray(event.routing_reasons) ? event.routing_reasons : [];
+  const detail = reasons.length
+    ? `SLM declined: ${reasons.map(humanizeRouteReason).join(", ")}`
+    : humanizeRouteSource(rawRoute);
+  return { kind, label, detail };
+}
+
+function inferRouteKind(agentId, routedFrom) {
+  const route = String(routedFrom || "").toLowerCase();
+  if (route.startsWith("fallback")) return "llm";
+  if (route === "browser-safety") return "safety";
+  if (agentId === "openai" || agentId === "claude") return "llm";
+  return route ? "slm" : "unknown";
+}
+
+function normalizeRouteKind(kind) {
+  return ["slm", "llm", "safety", "unavailable"].includes(kind) ? kind : "unknown";
+}
+
+function defaultRouteLabel(kind, routedFrom) {
+  if (kind === "slm") return routedFrom ? `SLM: ${routedFrom}` : "SLM";
+  if (kind === "llm") return routedFrom && routedFrom.startsWith("fallback") ? "LLM fallback" : "LLM";
+  if (kind === "safety") return "Safety rule";
+  if (kind === "unavailable") return "Fallback unavailable";
+  return "Unknown route";
+}
+
+function humanizeRouteSource(value) {
+  const source = String(value || "");
+  if (!source) return "";
+  if (source === "browser-safety") return "local safety rule";
+  if (source.startsWith("fallback after ")) {
+    return `SLM declined: ${source.replace("fallback after ", "").split(", ").map(humanizeRouteReason).join(", ")}`;
+  }
+  return `selected by ${source}`;
+}
+
+function humanizeRouteReason(value) {
+  const [source, reason] = String(value || "").split(":");
+  const cleanReason = (reason || source || "fallback").replaceAll("_", " ");
+  return reason ? `${source} ${cleanReason}` : cleanReason;
+}
+
+function updateRouteCounters(panel, kind) {
+  const bucket = normalizeRouteKind(kind);
+  panel.routeCounts[bucket] += 1;
+  renderRouteSummary(panel);
+}
+
+function renderRouteSummary(panel) {
+  const counts = panel.routeCounts;
+  panel.routing.innerHTML = `
+    <span class="route-count slm"><b>${counts.slm}</b> SLM</span>
+    <span class="route-count llm"><b>${counts.llm}</b> LLM</span>
+    ${counts.safety ? `<span class="route-count safety"><b>${counts.safety}</b> Safety</span>` : ""}
+    ${counts.unavailable ? `<span class="route-count unavailable"><b>${counts.unavailable}</b> Unavailable</span>` : ""}
+    ${counts.unknown ? `<span class="route-count unknown"><b>${counts.unknown}</b> Unknown</span>` : ""}
+  `;
 }
 
 function escapeHtml(value) {
@@ -252,5 +465,7 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+initializeTabs();
 runButton.addEventListener("click", startRun);
 loadConfig();
+loadGameWorld();

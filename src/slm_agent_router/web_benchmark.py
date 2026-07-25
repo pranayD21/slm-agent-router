@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 
 ACTION_SCHEMA: dict[str, Any] = {
@@ -62,7 +62,15 @@ Rules:
 - If the page shows CAPTCHA, unusual traffic, or bot protection, do not solve it. Navigate to a less bot-prone route or finish with a clear blocked message.
 - Do not finish from 404, not-found, unavailable, forbidden, or generic error pages.
 - If the user asks for a recommendation, comparison, or "best" choice, use a relevant source page as evidence and synthesize a concise recommendation; do not return raw page text.
+- Follow fast_plan.subtasks in order. Treat them as the checklist for completing the user's task, and do not finish until the checklist is satisfied.
+- If fast_plan.source_ready is true for a synthesis/recommendation task, finish with the best answer from the current source instead of clicking deeper.
 - Keep the final answer short and factual."""
+
+BROWSER_START_TIMEOUT_S = 20
+BROWSER_SNAPSHOT_TIMEOUT_S = 8
+BROWSER_SCREENSHOT_TIMEOUT_S = 8
+BROWSER_ACTION_TIMEOUT_S = 15
+MODEL_DECISION_TIMEOUT_S = 28
 
 
 @dataclass
@@ -72,6 +80,11 @@ class ProviderDecision:
     model: str
     latency_ms: int
     routed_from: str | None = None
+    route_kind: str | None = None
+    route_label: str | None = None
+    routing_reasons: list[str] | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
@@ -114,7 +127,14 @@ class UnavailableProvider(ActionProvider):
             "reason": self.message,
             "confidence": 1,
         }
-        return ProviderDecision(action, json.dumps(action), self.model, elapsed_ms(started))
+        return ProviderDecision(
+            action,
+            json.dumps(action),
+            self.model,
+            elapsed_ms(started),
+            route_kind="unavailable",
+            route_label="Fallback unavailable",
+        )
 
 
 class HeuristicProvider(ActionProvider):
@@ -129,7 +149,14 @@ class HeuristicProvider(ActionProvider):
     ) -> ProviderDecision:
         started = time.perf_counter()
         action = choose_heuristic_action(task, snapshot, history)
-        return ProviderDecision(action, json.dumps(action), self.model, elapsed_ms(started))
+        return ProviderDecision(
+            action,
+            json.dumps(action),
+            self.model,
+            elapsed_ms(started),
+            route_kind="slm",
+            route_label="SLM",
+        )
 
 
 class BrowserSafetyProvider(ActionProvider):
@@ -149,7 +176,15 @@ class BrowserSafetyProvider(ActionProvider):
         guarded = choose_browser_safety_action(task, snapshot, history)
         if guarded:
             raw = json.dumps(guarded)
-            return ProviderDecision(guarded, raw, self.model, elapsed_ms(started), "browser-safety")
+            return ProviderDecision(
+                guarded,
+                raw,
+                self.model,
+                elapsed_ms(started),
+                "browser-safety",
+                route_kind="safety",
+                route_label="Safety rule",
+            )
         return await self.provider.decide(task, snapshot, history)
 
 
@@ -189,7 +224,14 @@ class OllamaProvider(ActionProvider):
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
         raw = response.json().get("message", {}).get("content", "")
-        return ProviderDecision(parse_action(raw), raw, self.model, elapsed_ms(started))
+        return ProviderDecision(
+            parse_action(raw),
+            raw,
+            self.model,
+            elapsed_ms(started),
+            route_kind="slm",
+            route_label="SLM",
+        )
 
 
 class OpenAIProvider(ActionProvider):
@@ -242,8 +284,19 @@ class OpenAIProvider(ActionProvider):
         async with httpx.AsyncClient(timeout=self.timeout_s) as client:
             response = await client.post(f"{self.base_url}/responses", headers=headers, json=payload)
             response.raise_for_status()
-        raw = extract_openai_text(response.json())
-        return ProviderDecision(parse_action(raw), raw, self.model, elapsed_ms(started))
+        data = response.json()
+        raw = extract_openai_text(data)
+        input_tokens, output_tokens = extract_openai_usage(data)
+        return ProviderDecision(
+            parse_action(raw),
+            raw,
+            self.model,
+            elapsed_ms(started),
+            route_kind="llm",
+            route_label="LLM",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
 
 class AnthropicProvider(ActionProvider):
@@ -301,7 +354,17 @@ class AnthropicProvider(ActionProvider):
             response.raise_for_status()
         data = response.json()
         action, raw = extract_anthropic_action(data)
-        return ProviderDecision(normalize_action(action), raw, self.model, elapsed_ms(started))
+        input_tokens, output_tokens = extract_anthropic_usage(data)
+        return ProviderDecision(
+            normalize_action(action),
+            raw,
+            self.model,
+            elapsed_ms(started),
+            route_kind="llm",
+            route_label="LLM",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
 
 class CascadeProvider(ActionProvider):
@@ -332,6 +395,9 @@ class CascadeProvider(ActionProvider):
             reasons.append("dead_end")
             decision = await self.fallback_provider.decide(task, snapshot, history)
             decision.routed_from = f"fallback after {', '.join(reasons)}"
+            decision.route_kind = "llm" if getattr(self.fallback_provider, "api_key", None) else "unavailable"
+            decision.route_label = "LLM fallback" if decision.route_kind == "llm" else "Fallback unavailable"
+            decision.routing_reasons = reasons
             decision.latency_ms = elapsed_ms(started)
             return decision
         for provider in self.local_providers:
@@ -345,12 +411,18 @@ class CascadeProvider(ActionProvider):
             )
             if ok and confidence >= threshold:
                 decision.routed_from = provider.name
+                decision.route_kind = "slm"
+                decision.route_label = f"SLM: {provider.name}"
+                decision.routing_reasons = []
                 decision.latency_ms = elapsed_ms(started)
                 return decision
             reasons.append(f"{provider.name}:{reason or 'low_confidence'}")
 
         decision = await self.fallback_provider.decide(task, snapshot, history)
         decision.routed_from = f"fallback after {', '.join(reasons)}"
+        decision.route_kind = "llm" if getattr(self.fallback_provider, "api_key", None) else "unavailable"
+        decision.route_label = "LLM fallback" if decision.route_kind == "llm" else "Fallback unavailable"
+        decision.routing_reasons = reasons
         decision.latency_ms = elapsed_ms(started)
         return decision
 
@@ -402,7 +474,7 @@ class BrowserController:
     async def goto(self, url: str) -> None:
         assert self.page is not None
         await self.page.goto(ensure_url(url), wait_until="domcontentloaded", timeout=25000)
-        await self.page.wait_for_timeout(600)
+        await self.page.wait_for_timeout(350)
 
     async def snapshot(self) -> dict[str, Any]:
         assert self.page is not None
@@ -480,11 +552,11 @@ class BrowserController:
             await self.goto(text)
             return f"Visited {ensure_url(text)}"
         if kind == "wait":
-            await self.page.wait_for_timeout(1200)
+            await self.page.wait_for_timeout(900)
             return "Waited for page changes"
         if kind == "press":
             await self.page.keyboard.press(text or "Enter")
-            await self.page.wait_for_timeout(700)
+            await self.page.wait_for_timeout(450)
             return f"Pressed {text or 'Enter'}"
         if kind == "click":
             locator = self._locator(target, selector, text)
@@ -493,12 +565,12 @@ class BrowserController:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=8000)
             except Exception:
                 pass
-            await self.page.wait_for_timeout(700)
+            await self.page.wait_for_timeout(450)
             return f"Clicked {target or selector or text}"
         if kind == "fill":
             locator = self._locator(target, selector, "")
             await locator.fill(text, timeout=10000)
-            await self.page.wait_for_timeout(300)
+            await self.page.wait_for_timeout(200)
             return f"Filled {target or selector} with {text[:80]}"
         if kind == "finish":
             return "Finished"
@@ -518,15 +590,31 @@ class BrowserController:
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+class AgentTimeoutError(TimeoutError):
+    pass
+
+
+async def run_with_deadline(awaitable, deadline: float, label: str, cap_s: float | None = None):
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        raise AgentTimeoutError(f"{label} timed out because the agent reached its run deadline.")
+    timeout = remaining if cap_s is None else min(remaining, cap_s)
+    try:
+        return await asyncio.wait_for(awaitable, timeout=max(0.001, timeout))
+    except asyncio.TimeoutError as exc:
+        raise AgentTimeoutError(f"{label} timed out after {timeout:.1f}s.") from exc
+
+
 async def run_agent(
     config: AgentConfig,
     task: str,
     start_url: str | None,
     event_cb: EventCallback,
-    max_steps: int = 12,
     headless: bool = True,
+    timeout_s: int = 75,
 ) -> dict[str, Any]:
     run_started = time.perf_counter()
+    deadline = run_started + max(1, timeout_s)
     history: list[dict[str, Any]] = []
     controller = BrowserController(headless=headless)
     status = "running"
@@ -543,21 +631,48 @@ async def run_agent(
         }
     )
     try:
-        await controller.start(start_url)
-        plan = build_fast_plan(task, await controller.snapshot())
+        await run_with_deadline(controller.start(start_url), deadline, "Browser startup", BROWSER_START_TIMEOUT_S)
+        initial_snapshot = await run_with_deadline(
+            controller.snapshot(),
+            deadline,
+            "Initial browser snapshot",
+            BROWSER_SNAPSHOT_TIMEOUT_S,
+        )
+        plan = build_fast_plan(task, initial_snapshot)
         await event_cb(
             {
                 "type": "plan",
                 "agent_id": config.agent_id,
                 "items": plan["steps"],
+                "subtasks": plan["subtasks"],
                 "strategy": plan["strategy"],
             }
         )
-        await emit_screenshot(config, controller, event_cb)
-        for step_index in range(1, max_steps + 1):
+        await run_with_deadline(
+            emit_screenshot(config, controller, event_cb),
+            deadline,
+            "Initial screenshot",
+            BROWSER_SCREENSHOT_TIMEOUT_S,
+        )
+        while True:
+            if time.perf_counter() >= deadline:
+                status = "timeout"
+                answer = f"Stopped after {timeout_s}s because the browser agent timed out."
+                break
+            step_index = steps + 1
             steps = step_index
-            snapshot = await controller.snapshot()
-            decision = await config.provider.decide(task, snapshot, history)
+            snapshot = await run_with_deadline(
+                controller.snapshot(),
+                deadline,
+                "Browser snapshot",
+                BROWSER_SNAPSHOT_TIMEOUT_S,
+            )
+            decision = await run_with_deadline(
+                config.provider.decide(task, snapshot, history),
+                deadline,
+                "Model decision",
+                MODEL_DECISION_TIMEOUT_S,
+            )
             action = normalize_action(decision.action)
             ok, reason = validate_runtime_action(action, task, snapshot)
             if not ok:
@@ -570,7 +685,13 @@ async def run_agent(
                 "reason": action.get("reason", ""),
                 "model": decision.model,
                 "routed_from": decision.routed_from,
+                "route_kind": decision.route_kind or infer_route_kind(config.agent_id, decision.routed_from),
+                "route_label": decision.route_label,
+                "routing_reasons": decision.routing_reasons or [],
+                "decision_latency_ms": decision.latency_ms,
                 "llm_latency_ms": decision.latency_ms,
+                "input_tokens": decision.input_tokens,
+                "output_tokens": decision.output_tokens,
                 "elapsed_ms": elapsed_ms(run_started),
             }
             await event_cb(action_event)
@@ -580,7 +701,12 @@ async def run_agent(
                 status = "blocked" if is_blocked_answer(answer) else "completed"
                 break
             try:
-                result = await controller.apply_action(action)
+                result = await run_with_deadline(
+                    controller.apply_action(action),
+                    deadline,
+                    "Browser action",
+                    BROWSER_ACTION_TIMEOUT_S,
+                )
                 failed = False
             except Exception as step_exc:
                 result = f"Action failed: {step_exc}"
@@ -595,10 +721,23 @@ async def run_agent(
             }
             await event_cb(observation_event)
             history.append(observation_event)
-            await emit_screenshot(config, controller, event_cb)
-        else:
-            status = "max_steps"
-            answer = f"Stopped after {max_steps} steps."
+            await run_with_deadline(
+                emit_screenshot(config, controller, event_cb),
+                deadline,
+                "Screenshot",
+                BROWSER_SCREENSHOT_TIMEOUT_S,
+            )
+    except AgentTimeoutError as exc:
+        status = "timeout"
+        answer = str(exc)
+        await event_cb(
+            {
+                "type": "error",
+                "agent_id": config.agent_id,
+                "message": answer,
+                "elapsed_ms": elapsed_ms(run_started),
+            }
+        )
     except Exception as exc:
         status = "error"
         answer = str(exc)
@@ -631,8 +770,8 @@ async def run_benchmark(
     start_url: str | None,
     agents: list[AgentConfig],
     event_cb: EventCallback,
-    max_steps: int = 12,
     headless: bool = True,
+    timeout_s: int = 75,
 ) -> list[dict[str, Any]]:
     await event_cb(
         {
@@ -645,7 +784,17 @@ async def run_benchmark(
         }
     )
     results = await asyncio.gather(
-        *(run_agent(agent, task, start_url, event_cb, max_steps=max_steps, headless=headless) for agent in agents)
+        *(
+            run_agent(
+                agent,
+                task,
+                start_url,
+                event_cb,
+                headless=headless,
+                timeout_s=timeout_s,
+            )
+            for agent in agents
+        )
     )
     await event_cb({"type": "run_finished", "results": results, "finished_at": time.time()})
     return results
@@ -663,6 +812,19 @@ async def emit_screenshot(config: AgentConfig, controller: BrowserController, ev
             "elements": len(snapshot["elements"]),
         }
     )
+
+
+def infer_route_kind(agent_id: str, routed_from: str | None) -> str:
+    route = (routed_from or "").lower()
+    if route.startswith("fallback"):
+        return "llm"
+    if route == "browser-safety":
+        return "safety"
+    if agent_id in {"openai", "claude"}:
+        return "llm"
+    if route:
+        return "slm"
+    return "unknown"
 
 
 def build_agent_configs(
@@ -688,7 +850,12 @@ def build_agent_configs(
         "cascade": AgentConfig(
             "cascade",
             "SLM Cascade",
-            CascadeProvider(local_providers, cascade_fallback),
+            CascadeProvider(
+                local_providers,
+                cascade_fallback,
+                confidence_threshold=float(os.getenv("SLM_ROUTER_CONFIDENCE_THRESHOLD", "0.52")),
+                finish_confidence_threshold=float(os.getenv("SLM_ROUTER_FINISH_CONFIDENCE_THRESHOLD", "0.84")),
+            ),
             "local-first",
         ),
         "openai": AgentConfig("openai", "OpenAI", openai, "frontier"),
@@ -705,6 +872,8 @@ def provider_status() -> dict[str, Any]:
             + (f" + {os.getenv('OLLAMA_MODEL')}" if os.getenv("OLLAMA_MODEL") else "")
             + " -> "
             + (os.getenv("OPENAI_MODEL", "gpt-5.6-sol") if os.getenv("OPENAI_API_KEY") else os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5") if os.getenv("ANTHROPIC_API_KEY") else "unconfigured fallback"),
+            "confidence_threshold": float(os.getenv("SLM_ROUTER_CONFIDENCE_THRESHOLD", "0.52")),
+            "finish_confidence_threshold": float(os.getenv("SLM_ROUTER_FINISH_CONFIDENCE_THRESHOLD", "0.84")),
         },
         "openai": {
             "enabled": bool(os.getenv("OPENAI_API_KEY")),
@@ -728,6 +897,8 @@ def build_model_prompt(task: str, snapshot: dict[str, Any], history: list[dict[s
             "observation": item.get("message"),
             "failed": item.get("failed"),
             "routed_from": item.get("routed_from"),
+            "route_kind": item.get("route_kind"),
+            "routing_reasons": item.get("routing_reasons"),
         }
         for item in history[-6:]
     ]
@@ -763,6 +934,7 @@ def build_fast_plan(task: str, snapshot: dict[str, Any]) -> dict[str, Any]:
     domain = find_domain(task)
     search_query = clean_search_query(task) if wants_search(task.lower()) else ""
     click_target = extract_click_target(task) or ""
+    subtasks = decompose_task(task, search_query)
     steps: list[str] = []
     if explicit_url:
         steps.append(f"Open {explicit_url}.")
@@ -783,6 +955,9 @@ def build_fast_plan(task: str, snapshot: dict[str, Any]) -> dict[str, Any]:
         steps.append("The current page appears to be an error or not-found page; do not finish from it.")
     if needs_synthesis(task):
         steps.append("This task requires synthesis/recommendation, so local raw-text finish is not enough.")
+    source_ready = source_ready_for_synthesis(task, snapshot)
+    if source_ready:
+        steps.append("The current source appears to contain enough evidence; synthesize now.")
     return {
         "strategy": "direct-url" if explicit_url or domain else "search-route" if search_query else "page-inspection",
         "explicit_url": explicit_url or "",
@@ -793,8 +968,29 @@ def build_fast_plan(task: str, snapshot: dict[str, Any]) -> dict[str, Any]:
         "blocked_page": is_blocked_page(snapshot),
         "error_page": is_error_page(snapshot),
         "requires_synthesis": needs_synthesis(task),
+        "source_ready": source_ready,
+        "subtasks": subtasks,
         "steps": steps,
     }
+
+
+def decompose_task(task: str, search_query: str) -> list[str]:
+    subtasks = ["Normalize the user's request and identify the target outcome."]
+    if search_query:
+        subtasks.append(f"Find a credible source for: {search_query}.")
+    elif find_url(task) or find_domain(task):
+        subtasks.append("Open the named site or URL directly.")
+    else:
+        subtasks.append("Inspect the current page and identify the next useful control.")
+    subtasks.append("Reject search snippets, CAPTCHA pages, not-found pages, and generic error pages.")
+    if needs_synthesis(task):
+        subtasks.append("Collect concrete candidates, constraints, and evidence from the source page.")
+        subtasks.append("Synthesize a recommendation with a short reason and caveat.")
+    elif wants_answer(task.lower()):
+        subtasks.append("Extract the exact requested fact from the source page.")
+    else:
+        subtasks.append("Complete the requested browser action.")
+    return subtasks
 
 
 def choose_browser_safety_action(
@@ -893,6 +1089,16 @@ def choose_heuristic_action(
         if is_search_results_page(snapshot):
             result = first_search_result(elements)
             if result and not recently_clicked(history, result["id"]):
+                result_url = search_result_url(result)
+                if result_url:
+                    return {
+                        "action": "goto",
+                        "target": "",
+                        "selector": "",
+                        "text": result_url,
+                        "reason": "A search result URL is visible; opening it directly avoids a fragile click.",
+                        "confidence": 0.83,
+                    }
                 return {
                     "action": "click",
                     "target": result["id"],
@@ -1192,6 +1398,17 @@ def page_seems_relevant(task: str, snapshot: dict[str, Any]) -> bool:
     return hits >= min(2, len(terms))
 
 
+def source_ready_for_synthesis(task: str, snapshot: dict[str, Any]) -> bool:
+    if not needs_synthesis(task):
+        return False
+    if is_search_results_page(snapshot) or is_error_page(snapshot) or is_blocked_page(snapshot):
+        return False
+    text = str(snapshot.get("text", ""))
+    if len(text) < 450:
+        return False
+    return page_seems_relevant(task, snapshot)
+
+
 def content_terms(task: str) -> list[str]:
     normalized = normalize_query_text(task)
     raw_terms = re.findall(r"[a-z0-9][a-z0-9-]{2,}", normalized.lower())
@@ -1272,6 +1489,17 @@ def first_search_result(elements: list[dict[str, Any]]) -> dict[str, Any] | None
     return None
 
 
+def search_result_url(element: dict[str, Any]) -> str:
+    href = str(element.get("href", "")).strip()
+    if not href:
+        return ""
+    parsed = urlparse(href)
+    if "duckduckgo.com" in parsed.netloc and "uddg" in parsed.query:
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        return unquote(target)
+    return href
+
+
 def recently_clicked(history: list[dict[str, Any]], target_id: str) -> bool:
     for item in history[-5:]:
         action = item.get("action", {})
@@ -1305,6 +1533,13 @@ def extract_openai_text(data: dict[str, Any]) -> str:
     return "\n".join(chunks).strip()
 
 
+def extract_openai_usage(data: dict[str, Any]) -> tuple[int, int]:
+    usage = data.get("usage") or {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    return input_tokens, output_tokens
+
+
 def extract_anthropic_action(data: dict[str, Any]) -> tuple[dict[str, Any], str]:
     text_chunks: list[str] = []
     for item in data.get("content", []):
@@ -1315,6 +1550,11 @@ def extract_anthropic_action(data: dict[str, Any]) -> tuple[dict[str, Any], str]
             text_chunks.append(item.get("text", ""))
     raw = "\n".join(text_chunks).strip()
     return parse_action(raw), raw
+
+
+def extract_anthropic_usage(data: dict[str, Any]) -> tuple[int, int]:
+    usage = data.get("usage") or {}
+    return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
 
 
 def find_url(text: str) -> str | None:

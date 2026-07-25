@@ -11,50 +11,95 @@
       <header class="topbar">
         <div>
           <h1>Browser Agent Benchmark</h1>
-          <p class="subtitle">SLM Cascade vs frontier browser agents</p>
+          <p class="subtitle">SLM Cascade vs frontier agents across browsers and games</p>
         </div>
         <div class="run-total" id="run-total">Idle</div>
       </header>
 
-      <section class="controls" aria-label="Benchmark controls">
-        <label class="prompt-field">
-          <span>Task prompt</span>
-          <textarea id="task" rows="3">Go to https://example.com and report the page heading.</textarea>
-        </label>
-        <div class="control-grid">
-          <label>
-            <span>Start URL</span>
-            <input id="start-url" type="url" placeholder="Optional">
+      <nav class="mode-tabs" aria-label="Benchmark mode">
+        <button class="mode-tab active" type="button" data-view="browser-view">Browser race</button>
+        <button class="mode-tab" type="button" data-view="gameworld-view">GameWorld benchmark</button>
+      </nav>
+
+      <section id="browser-view" class="view active">
+        <section class="controls" aria-label="Benchmark controls">
+          <label class="prompt-field">
+            <span>Task prompt</span>
+            <textarea id="task" rows="3">Go to https://example.com and report the page heading.</textarea>
           </label>
-          <label>
-            <span>Max steps</span>
-            <input id="max-steps" type="number" min="1" max="40" value="12">
-          </label>
-          <button id="run" type="button">Run comparison</button>
-        </div>
-        <details class="keys">
-          <summary>Use my API keys for this run</summary>
-          <div class="key-grid">
+          <div class="control-grid">
             <label>
-              <span>OpenAI API key</span>
-              <input id="openai-key" type="password" autocomplete="off" placeholder="Optional">
+              <span>Start URL</span>
+              <input id="start-url" type="url" placeholder="Optional">
             </label>
-            <label>
-              <span>Anthropic API key</span>
-              <input id="anthropic-key" type="password" autocomplete="off" placeholder="Optional">
-            </label>
+            <button id="run" type="button">Run comparison</button>
           </div>
-        </details>
-        <fieldset class="agents">
-          <legend>Agents</legend>
-          <label><input type="checkbox" name="agent" value="cascade" checked> SLM Cascade <small id="model-cascade"></small></label>
-          <label><input type="checkbox" name="agent" value="openai" checked> OpenAI <small id="model-openai"></small></label>
-          <label><input type="checkbox" name="agent" value="claude" checked> Claude <small id="model-claude"></small></label>
-        </fieldset>
+          <details class="keys">
+            <summary>Use my API keys for this run</summary>
+            <div class="key-grid">
+              <label>
+                <span>OpenAI API key</span>
+                <input id="openai-key" type="password" autocomplete="off" placeholder="Optional">
+              </label>
+              <label>
+                <span>Anthropic API key</span>
+                <input id="anthropic-key" type="password" autocomplete="off" placeholder="Optional">
+              </label>
+            </div>
+          </details>
+          <fieldset class="agents">
+            <legend>Agents</legend>
+            <label><input type="checkbox" name="agent" value="cascade" checked> SLM Cascade <small id="model-cascade"></small></label>
+            <label><input type="checkbox" name="agent" value="openai" checked> OpenAI <small id="model-openai"></small></label>
+            <label><input type="checkbox" name="agent" value="claude" checked> Claude <small id="model-claude"></small></label>
+          </fieldset>
+        </section>
+
+        <section class="summary" id="summary" aria-live="polite"></section>
+        <section class="board" id="board" aria-label="Agent browser comparison"></section>
       </section>
 
-      <section class="summary" id="summary" aria-live="polite"></section>
-      <section class="board" id="board" aria-label="Agent browser comparison"></section>
+      <section id="gameworld-view" class="view">
+        <section class="gameworld-hero" aria-label="GameWorld benchmark overview">
+          <div>
+            <p class="eyebrow">GameWorld benchmark</p>
+            <h2>Game agents compared by success, speed, and token cost</h2>
+            <p class="gameworld-copy">GameWorld evaluates multimodal agents across browser games with state-verifiable outcomes. This dashboard compares the cascade, OpenAI, and Claude on score, time, actions, and cost per successful task.</p>
+          </div>
+          <div class="report-source" id="gameworld-source">Loading report</div>
+        </section>
+
+        <section class="scorecards" id="gameworld-cards" aria-label="GameWorld summary cards"></section>
+
+        <section class="chart-grid" aria-label="GameWorld charts">
+          <article class="chart-panel">
+            <h2>Pass Rate</h2>
+            <div class="bar-chart" id="pass-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Median Time</h2>
+            <div class="bar-chart inverse" id="time-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Token Cost</h2>
+            <div class="bar-chart inverse" id="cost-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Cost Per Success</h2>
+            <div class="bar-chart inverse" id="cost-success-chart"></div>
+          </article>
+        </section>
+
+        <section class="game-grid" id="game-grid" aria-label="Per-game model scores"></section>
+
+        <section class="trace-panel" aria-label="Representative GameWorld run timeline">
+          <div class="trace-head">
+            <h2>Representative Run Timeline</h2>
+            <p>Route lanes show where the cascade spends cheap local actions versus LLM fallback actions.</p>
+          </div>
+          <div class="trace-lanes" id="trace-lanes"></div>
+        </section>
+      </section>
     </main>
     <template id="agent-template">
       <article class="agent-panel">
@@ -69,6 +114,10 @@
           <span class="timer">0.0s</span>
           <span class="steps">0 steps</span>
           <span class="badge"></span>
+        </div>
+        <div class="routing-summary" aria-label="Routing choices">
+          <span class="route-count slm"><b>0</b> SLM</span>
+          <span class="route-count llm"><b>0</b> LLM</span>
         </div>
         <div class="viewport">
           <img alt="">
