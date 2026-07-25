@@ -13,7 +13,7 @@ AGENTS: dict[str, dict[str, Any]] = {
     "cascade": {
         "label": "SLM Cascade",
         "model": os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
-        "route": ["Local retrieval", "Ollama SLM call", "Validate answer", "Retry or fallback if needed"],
+        "route": ["Local retrieval", "Ollama plan", "Validate plan", "Compose or synthesize"],
     },
     "openai": {
         "label": "OpenAI Agent",
@@ -25,6 +25,38 @@ AGENTS: dict[str, dict[str, Any]] = {
         "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
         "route": ["Send inbox to Claude", "Receive structured answer", "Validate answer", "Prepare actions"],
     },
+}
+
+
+INBOX_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "selected_email_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Email ids from the supplied mailbox that should be used to complete the task.",
+        },
+        "needs_llm": {
+            "type": "boolean",
+            "description": "True when the final response needs nuanced synthesis or drafting by a larger model.",
+        },
+        "strategy": {
+            "type": "string",
+            "enum": ["direct_answer", "summarize", "draft_replies", "archive", "action_plan", "fallback_synthesis"],
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Brief reason for the route decision. Do not write the final answer here.",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence that the selected ids and routing choice are enough for the next stage.",
+        },
+    },
+    "required": ["selected_email_ids", "needs_llm", "strategy", "rationale", "confidence"],
 }
 
 
@@ -97,6 +129,18 @@ Rules:
 - Be concise, but include enough content for a person to act on the email."""
 
 
+INBOX_PLAN_SYSTEM_PROMPT = """You are the cheap routing stage of an inbox-management cascade.
+You do not write the final user answer. Your job is to pick the email ids needed for the task and decide whether the final stage needs a larger LLM.
+
+Rules:
+- Return only JSON matching the inbox_plan schema.
+- Select only ids from the supplied mailbox.
+- Use needs_llm=false for direct lookups, simple archive decisions, and simple extraction where the answer can be copied or templated from the selected emails.
+- Use needs_llm=true for drafting replies, multi-email prioritization, nuanced action plans, or ambiguous synthesis.
+- Keep rationale short. Do not summarize the mailbox in rationale.
+- confidence must be lower when the selected ids may be incomplete or the prompt is ambiguous."""
+
+
 @dataclass
 class InboxProviderOutput:
     provider: str
@@ -113,6 +157,21 @@ class InboxProviderOutput:
     cost_usd: float | None = None
     route_events: list[dict[str, Any]] = field(default_factory=list)
     messages_sent_to_model: int | None = None
+
+
+@dataclass
+class InboxPlanOutput:
+    provider: str
+    model: str
+    selected_email_ids: list[str]
+    needs_llm: bool
+    strategy: str
+    rationale: str
+    raw: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    confidence: float = 0.0
+    error: str | None = None
 
 
 SYNTHETIC_INBOX: list[dict[str, Any]] = [
@@ -908,6 +967,38 @@ class OllamaInboxProvider(InboxProvider):
         except Exception as exc:
             return unavailable_output("ollama", self.model, f"Ollama call failed: {safe_error(exc)}")
 
+    async def plan(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxPlanOutput:
+        import httpx
+
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "format": INBOX_PLAN_SCHEMA,
+            "options": {"temperature": 0},
+            "messages": [
+                {"role": "system", "content": INBOX_PLAN_SYSTEM_PROMPT},
+                {"role": "user", "content": build_inbox_plan_prompt(prompt, intent, emails)},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            if response.status_code >= 400:
+                return unavailable_plan_output("ollama", self.model, response_error("Ollama", response))
+            data = response.json()
+            raw = data.get("message", {}).get("content", "")
+            parsed = parse_model_json(raw)
+            input_tokens = int(data.get("prompt_eval_count") or 0)
+            output_tokens = int(data.get("eval_count") or 0)
+            return plan_output_from_payload("ollama", self.model, parsed, raw, input_tokens, output_tokens)
+        except Exception as exc:
+            return unavailable_plan_output("ollama", self.model, f"Ollama plan call failed: {safe_error(exc)}")
+
 
 class InboxCascadeProvider(InboxProvider):
     provider = "cascade"
@@ -951,9 +1042,10 @@ class InboxCascadeProvider(InboxProvider):
         total_input_tokens = 0
         total_output_tokens = 0
         total_messages_sent = 0
-        fallback_cost = 0.0
+        cloud_cost = 0.0
         best_output: InboxProviderOutput | None = None
-        best_validation: dict[str, Any] | None = None
+        best_plan: InboxPlanOutput | None = None
+        best_plan_validation: dict[str, Any] | None = None
 
         retrieval_confidence = local_retrieval_confidence(local_context, matched, intent)
         route_events.append(
@@ -970,46 +1062,115 @@ class InboxCascadeProvider(InboxProvider):
         for attempt_index in range(attempts):
             attempt_started = time.perf_counter()
             attempt_prompt = prompt
-            if best_validation:
-                attempt_prompt = retry_prompt(prompt, best_validation)
-            output = await self.local_provider.complete(attempt_prompt, intent, local_context)
-            output.confidence = output.confidence or inferred_output_confidence(output, prompt, intent, matched)
-            total_input_tokens += output.input_tokens
-            total_output_tokens += output.output_tokens
+            if best_plan_validation:
+                attempt_prompt = plan_retry_prompt(prompt, best_plan_validation)
+            plan = await call_local_plan(self.local_provider, attempt_prompt, intent, local_context)
+            total_input_tokens += plan.input_tokens
+            total_output_tokens += plan.output_tokens
             total_messages_sent += len(local_context)
             route_events.append(
                 route_event(
                     "slm",
-                    f"Ollama attempt {attempt_index + 1}",
-                    model_call_detail(output),
-                    confidence=output.confidence,
+                    f"Ollama plan {attempt_index + 1}",
+                    plan_call_detail(plan),
+                    confidence=plan.confidence,
                     latency_ms=duration_ms(attempt_started),
-                    tokens=output.input_tokens + output.output_tokens,
+                    tokens=plan.input_tokens + plan.output_tokens,
+                    messages=len(local_context),
                 )
             )
 
-            validation = validate_cascade_attempt(output, prompt, intent, matched, self.confidence_threshold)
+            selected = selected_from_plan_output(plan)
+            plan_validation = validate_plan_attempt(
+                plan,
+                selected,
+                matched,
+                intent,
+                plan_confidence_threshold(intent, selected, matched, self.confidence_threshold),
+            )
             route_events.append(
                 route_event(
                     "validator",
-                    "Validate local answer",
-                    validation_detail(validation),
-                    confidence=validation["confidence"],
+                    "Validate SLM plan",
+                    validation_detail(plan_validation),
+                    confidence=plan_validation["confidence"],
                 )
             )
-            if is_better_validation(validation, best_validation):
-                best_output = output
-                best_validation = validation
-            if validation["accepted"]:
-                return cascade_output(
-                    output,
-                    model=f"ollama:{output.model}",
-                    route_events=route_events,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    cost_usd=0.0,
-                    messages_sent_to_model=total_messages_sent,
-                )
+            if is_better_validation(plan_validation, best_plan_validation):
+                best_plan = plan
+                best_plan_validation = plan_validation
+            if plan_validation["accepted"]:
+                if should_use_llm_for_final(plan, intent, selected):
+                    synthesis_result = await self.synthesize_with_llm(prompt, intent, selected, matched, route_events)
+                    if synthesis_result:
+                        output, synth_input, synth_output, synth_cost, synth_messages = synthesis_result
+                        total_input_tokens += synth_input
+                        total_output_tokens += synth_output
+                        total_messages_sent += synth_messages
+                        cloud_cost += synth_cost
+                        return cascade_output(
+                            output,
+                            model=f"ollama:{plan.model} -> {output.provider}:{output.model}",
+                            route_events=route_events,
+                            input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens,
+                            cost_usd=cloud_cost,
+                            messages_sent_to_model=total_messages_sent,
+                        )
+                else:
+                    output = local_output_from_plan(plan, prompt, intent, selected)
+                    best_output = output
+                    route_events.append(
+                        route_event(
+                            "slm",
+                            "Local compose",
+                            local_compose_detail(plan, selected),
+                            confidence=output.confidence,
+                            tokens=0,
+                            messages=len(selected),
+                        )
+                    )
+                    final_validation = validate_cascade_attempt(
+                        output,
+                        prompt,
+                        intent,
+                        matched,
+                        plan_confidence_threshold(intent, selected, matched, self.fallback_confidence_threshold),
+                    )
+                    route_events.append(
+                        route_event(
+                            "validator",
+                            "Validate final answer",
+                            validation_detail(final_validation),
+                            confidence=final_validation["confidence"],
+                        )
+                    )
+                    if final_validation["accepted"]:
+                        return cascade_output(
+                            output,
+                            model=f"ollama:{plan.model} -> local-compose",
+                            route_events=route_events,
+                            input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens,
+                            cost_usd=cloud_cost,
+                            messages_sent_to_model=total_messages_sent,
+                        )
+                    synthesis_result = await self.synthesize_with_llm(prompt, intent, selected, matched, route_events)
+                    if synthesis_result:
+                        output, synth_input, synth_output, synth_cost, synth_messages = synthesis_result
+                        total_input_tokens += synth_input
+                        total_output_tokens += synth_output
+                        total_messages_sent += synth_messages
+                        cloud_cost += synth_cost
+                        return cascade_output(
+                            output,
+                            model=f"ollama:{plan.model} -> local-compose -> {output.provider}:{output.model}",
+                            route_events=route_events,
+                            input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens,
+                            cost_usd=cloud_cost,
+                            messages_sent_to_model=total_messages_sent,
+                        )
             if attempt_index + 1 < attempts:
                 previous_count = len(local_context)
                 local_context = expanded_inbox_context(prompt, intent, local_context)
@@ -1018,31 +1179,29 @@ class InboxCascadeProvider(InboxProvider):
                         "slm",
                         "Retry/replan",
                         "Broadened local context from "
-                        f"{previous_count} to {len(local_context)} messages after {failure_summary(validation)}.",
-                        confidence=max(0.1, validation["confidence"] - 0.08),
+                        f"{previous_count} to {len(local_context)} messages after {failure_summary(plan_validation)}.",
+                        confidence=max(0.1, plan_validation["confidence"] - 0.08),
                         messages=len(local_context),
                     )
                 )
 
-        fallback_result = await self.complete_with_fallback(
-            prompt,
-            intent,
-            matched,
-            route_events,
-            total_messages_sent,
-        )
-        if fallback_result:
-            output, fallback_input, fallback_output, fallback_cost, fallback_messages = fallback_result
-            total_input_tokens += fallback_input
-            total_output_tokens += fallback_output
-            total_messages_sent += fallback_messages
+        fallback_context = selected_from_plan_output(best_plan) if best_plan else []
+        if not fallback_context:
+            fallback_context = matched or local_context
+        synthesis_result = await self.synthesize_with_llm(prompt, intent, fallback_context, matched, route_events)
+        if synthesis_result:
+            output, synth_input, synth_output, synth_cost, synth_messages = synthesis_result
+            total_input_tokens += synth_input
+            total_output_tokens += synth_output
+            total_messages_sent += synth_messages
+            cloud_cost += synth_cost
             return cascade_output(
                 output,
                 model=f"ollama:{self.local_provider.model} -> {output.provider}:{output.model}",
                 route_events=route_events,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
-                cost_usd=fallback_cost,
+                cost_usd=cloud_cost,
                 messages_sent_to_model=total_messages_sent,
             )
 
@@ -1052,7 +1211,7 @@ class InboxCascadeProvider(InboxProvider):
                     "unavailable",
                     "Fallback unavailable",
                     "No configured cloud fallback accepted the handoff; showing the best local result for review.",
-                    confidence=best_validation["confidence"] if best_validation else best_output.confidence,
+                    confidence=best_plan_validation["confidence"] if best_plan_validation else best_output.confidence,
                 )
             )
             return cascade_output(
@@ -1061,7 +1220,7 @@ class InboxCascadeProvider(InboxProvider):
                 route_events=route_events,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
-                cost_usd=fallback_cost,
+                cost_usd=cloud_cost,
                 messages_sent_to_model=total_messages_sent,
             )
 
@@ -1070,30 +1229,33 @@ class InboxCascadeProvider(InboxProvider):
         unavailable.messages_sent_to_model = total_messages_sent
         return unavailable
 
-    async def complete_with_fallback(
+    async def synthesize_with_llm(
         self,
         prompt: str,
         intent: dict[str, Any],
+        context: list[dict[str, Any]],
         matched: list[dict[str, Any]],
         route_events: list[dict[str, Any]],
-        messages_sent_before_fallback: int,
     ) -> tuple[InboxProviderOutput, int, int, float, int] | None:
-        del messages_sent_before_fallback
+        synthesis_context = context or matched or SYNTHETIC_INBOX
+        synthesis_prompt = cascade_synthesis_prompt(prompt, synthesis_context)
+        best_result: tuple[InboxProviderOutput, int, int, float, int] | None = None
+        best_validation: dict[str, Any] | None = None
         for provider in self.fallback_providers:
-            fallback_started = time.perf_counter()
-            output = await provider.complete(prompt, intent, SYNTHETIC_INBOX)
+            synth_started = time.perf_counter()
+            output = await provider.complete(synthesis_prompt, intent, synthesis_context)
             output.confidence = output.confidence or inferred_output_confidence(output, prompt, intent, matched)
-            fallback_tokens = output.input_tokens + output.output_tokens
+            synth_tokens = output.input_tokens + output.output_tokens
             route_kind = "llm" if not output.error else "unavailable"
             route_events.append(
                 route_event(
                     route_kind,
-                    f"{provider.provider.title()} fallback",
-                    model_call_detail(output),
+                    f"{provider_label(provider.provider)} synthesize",
+                    model_call_detail(output, message_count=len(synthesis_context)),
                     confidence=output.confidence,
-                    latency_ms=duration_ms(fallback_started),
-                    tokens=fallback_tokens,
-                    messages=len(SYNTHETIC_INBOX),
+                    latency_ms=duration_ms(synth_started),
+                    tokens=synth_tokens,
+                    messages=len(synthesis_context),
                 )
             )
             if output.error:
@@ -1108,15 +1270,19 @@ class InboxCascadeProvider(InboxProvider):
             route_events.append(
                 route_event(
                     "validator",
-                    "Validate fallback answer",
+                    "Validate synthesized answer",
                     validation_detail(validation),
                     confidence=validation["confidence"],
                 )
             )
             if validation["accepted"]:
                 cost = estimate_provider_cost_usd(output.provider, output.model, output.input_tokens, output.output_tokens)
-                return output, output.input_tokens, output.output_tokens, cost, len(SYNTHETIC_INBOX)
-        return None
+                return output, output.input_tokens, output.output_tokens, cost, len(synthesis_context)
+            if is_better_validation(validation, best_validation):
+                cost = estimate_provider_cost_usd(output.provider, output.model, output.input_tokens, output.output_tokens)
+                best_result = (output, output.input_tokens, output.output_tokens, cost, len(synthesis_context))
+                best_validation = validation
+        return best_result
 
 
 class DeterministicInboxProvider(InboxProvider):
@@ -1186,6 +1352,234 @@ def route_event(
 
 def duration_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000
+
+
+async def call_local_plan(
+    provider: InboxProvider,
+    prompt: str,
+    intent: dict[str, Any],
+    emails: list[dict[str, Any]],
+) -> InboxPlanOutput:
+    plan_method = getattr(provider, "plan", None)
+    if callable(plan_method):
+        return await plan_method(prompt, intent, emails)
+    output = await provider.complete(prompt, intent, emails)
+    strategy = strategy_for_intent(intent)
+    return InboxPlanOutput(
+        provider=output.provider,
+        model=output.model,
+        selected_email_ids=output.selected_email_ids,
+        needs_llm=default_needs_llm(strategy, intent, selected_from_provider_output(output)),
+        strategy=strategy,
+        rationale="Legacy local provider returned a final response; using selected ids as the plan.",
+        raw=output.raw,
+        input_tokens=output.input_tokens,
+        output_tokens=output.output_tokens,
+        confidence=output.confidence,
+        error=output.error,
+    )
+
+
+def validate_plan_attempt(
+    plan: InboxPlanOutput,
+    selected: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    intent: dict[str, Any],
+    confidence_threshold: float,
+) -> dict[str, Any]:
+    confidence = clamp_confidence(plan.confidence)
+    if plan.error:
+        return {
+            "accepted": False,
+            "confidence": confidence,
+            "check_ratio": 0.0,
+            "failed_reasons": ["plan_provider_unavailable"],
+            "completion": {
+                "passed_checks": 0,
+                "total_checks": 1,
+                "checks": [{"label": "SLM plan completed", "passed": False, "detail": plan.error}],
+            },
+            "selected_count": 0,
+        }
+    selected_ids = {email["id"] for email in selected}
+    matched_ids = {email["id"] for email in matched}
+    checks = [
+        {
+            "label": "Selected evidence",
+            "passed": bool(selected),
+            "detail": f"{len(selected)} email{'s' if len(selected) != 1 else ''} selected for the next stage.",
+        },
+    ]
+    if matched_ids:
+        if intent.get("direct_lookup") or intent.get("targeted_lookup"):
+            checks.append(
+                {
+                    "label": "Matched prompt target",
+                    "passed": matched_ids.issubset(selected_ids),
+                    "detail": f"Expected {len(matched_ids)} target email{'s' if len(matched_ids) != 1 else ''}.",
+                }
+            )
+            checks.append(
+                {
+                    "label": "Kept route narrow",
+                    "passed": selected_ids.issubset(matched_ids),
+                    "detail": "Direct lookups should route only the requested sender or message.",
+                }
+            )
+        else:
+            overlap = len(selected_ids & matched_ids)
+            needed_overlap = max(1, min(len(matched_ids), round(len(matched_ids) * 0.7)))
+            checks.append(
+                {
+                    "label": "Covered important matches",
+                    "passed": overlap >= needed_overlap,
+                    "detail": f"Covered {overlap}/{len(matched_ids)} high-priority candidates.",
+                }
+            )
+    checks.append(
+        {
+            "label": "Confidence threshold",
+            "passed": confidence >= confidence_threshold,
+            "detail": f"Plan confidence {confidence:.2f}; threshold {confidence_threshold:.2f}.",
+        }
+    )
+    passed = sum(1 for check in checks if check["passed"])
+    failed_reasons = [check["label"] for check in checks if not check["passed"]]
+    return {
+        "accepted": passed == len(checks),
+        "confidence": confidence,
+        "check_ratio": passed / max(1, len(checks)),
+        "failed_reasons": failed_reasons,
+        "completion": {"passed_checks": passed, "total_checks": len(checks), "checks": checks},
+        "selected_count": len(selected),
+    }
+
+
+def plan_confidence_threshold(
+    intent: dict[str, Any],
+    selected: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    default_threshold: float,
+) -> float:
+    selected_ids = {email["id"] for email in selected}
+    matched_ids = {email["id"] for email in matched}
+    direct_threshold = float(os.getenv("INBOX_CASCADE_DIRECT_CONFIDENCE_THRESHOLD", "0.55"))
+    if (
+        (intent.get("direct_lookup") or intent.get("targeted_lookup"))
+        and matched_ids
+        and selected_ids == matched_ids
+        and len(selected_ids) <= 2
+    ):
+        return min(default_threshold, direct_threshold)
+    return default_threshold
+
+
+def selected_from_plan_output(plan: InboxPlanOutput | None) -> list[dict[str, Any]]:
+    if not plan:
+        return []
+    return selected_from_ids(plan.selected_email_ids)
+
+
+def should_use_llm_for_final(plan: InboxPlanOutput, intent: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
+    if plan.error or not selected:
+        return True
+    if intent["wants_reply"]:
+        return True
+    if intent["wants_archive"]:
+        return False
+    if intent.get("direct_lookup") and len(selected) <= 2:
+        return False
+    if plan.strategy in {"direct_answer", "archive"} and len(selected) <= 3:
+        return False
+    if plan.needs_llm:
+        return True
+    return intent["wants_summary"] and len(selected) > 1
+
+
+def local_output_from_plan(
+    plan: InboxPlanOutput,
+    prompt: str,
+    intent: dict[str, Any],
+    selected: list[dict[str, Any]],
+) -> InboxProviderOutput:
+    answer = compose_answer("cascade", prompt, intent, selected)
+    drafts = compose_drafts("cascade", selected, intent)
+    operations = mailbox_operations(selected, intent)
+    return InboxProviderOutput(
+        provider="local-cascade",
+        model=plan.model,
+        selected_email_ids=[email["id"] for email in selected],
+        answer=answer,
+        drafts=drafts,
+        operations=operations,
+        raw=json.dumps(
+            {
+                "selected_email_ids": [email["id"] for email in selected],
+                "answer": answer,
+                "drafts": drafts,
+                "operations": operations,
+                "confidence": plan.confidence,
+                "source_plan": plan.raw,
+            },
+            ensure_ascii=True,
+        ),
+        confidence=plan.confidence,
+    )
+
+
+def local_compose_detail(plan: InboxPlanOutput, selected: list[dict[str, Any]]) -> str:
+    return (
+        f"Used {plan.strategy.replace('_', ' ')} route to compose from "
+        f"{len(selected)} selected email{'s' if len(selected) != 1 else ''} without a cloud LLM."
+    )
+
+
+def cascade_synthesis_prompt(prompt: str, context: list[dict[str, Any]]) -> str:
+    ids = ", ".join(email["id"] for email in context)
+    return (
+        prompt
+        + "\n\nCascade handoff: the SLM planner selected only these email ids for final synthesis: "
+        + ids
+        + ". Use only the supplied selected emails. Keep the answer grounded and concise."
+    )
+
+
+def strategy_for_intent(intent: dict[str, Any]) -> str:
+    if intent["wants_reply"]:
+        return "draft_replies"
+    if intent["wants_archive"]:
+        return "archive"
+    if intent.get("direct_lookup"):
+        return "direct_answer"
+    if intent["wants_summary"]:
+        return "summarize"
+    return "action_plan"
+
+
+def default_needs_llm(strategy: str, intent: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
+    if strategy in {"draft_replies", "action_plan", "fallback_synthesis"}:
+        return True
+    if strategy == "summarize":
+        return len(selected) > 1
+    return bool(intent["wants_reply"])
+
+
+def plan_call_detail(plan: InboxPlanOutput) -> str:
+    if plan.error:
+        return plan.error
+    route = "LLM synthesis" if plan.needs_llm else "local compose"
+    return (
+        f"Selected {len(plan.selected_email_ids)} id{'s' if len(plan.selected_email_ids) != 1 else ''}; "
+        f"strategy {plan.strategy.replace('_', ' ')}; next {route}."
+    )
+
+
+def provider_label(provider: str) -> str:
+    if provider == "openai":
+        return "OpenAI"
+    if provider == "claude":
+        return "Claude"
+    return provider.title()
 
 
 def local_retrieval_confidence(
@@ -1297,6 +1691,16 @@ def retry_prompt(prompt: str, validation: dict[str, Any]) -> str:
     )
 
 
+def plan_retry_prompt(prompt: str, validation: dict[str, Any]) -> str:
+    return (
+        prompt
+        + "\n\nRetry/replan instruction: the previous SLM plan did not pass validation because "
+        + failure_summary(validation)
+        + ". Select the exact supporting email ids, choose the cheapest safe next stage, "
+        + "and set confidence only as high as the evidence allows."
+    )
+
+
 def expanded_inbox_context(
     prompt: str,
     intent: dict[str, Any],
@@ -1315,10 +1719,13 @@ def expanded_inbox_context(
     return [email for score, email in candidates if score > 0][: min(target_count, len(SYNTHETIC_INBOX))]
 
 
-def model_call_detail(output: InboxProviderOutput) -> str:
+def model_call_detail(output: InboxProviderOutput, message_count: int | None = None) -> str:
     if output.error:
         return output.error
-    return f"Called {output.provider} model {output.model}."
+    detail = f"Called {output.provider} model {output.model}."
+    if message_count is not None:
+        detail += f" Sent {message_count} selected message{'s' if message_count != 1 else ''}."
+    return detail
 
 
 def cascade_output(
@@ -1391,9 +1798,19 @@ def analyze_prompt(prompt: str) -> dict[str, Any]:
     text = prompt.lower()
     number_match = re.search(r"\b(\d{1,2})\b", text)
     count = int(number_match.group(1)) if number_match else 5
-    wants_reply = any(term in text for term in ["respond", "reply", "draft", "answer", "send"])
-    wants_archive = any(term in text for term in ["archive", "ignore", "low priority", "safe to ignore"])
     wants_summary = any(term in text for term in ["summarize", "summary", "brief", "important", "prioritize"])
+    wants_reply = (
+        "draft" in text
+        or "write a reply" in text
+        or "write replies" in text
+        or "reply to" in text
+        or "respond to" in text
+        or "send a reply" in text
+        or "send replies" in text
+    )
+    if wants_summary and not any(term in text for term in ["draft", "write", "send a reply", "send replies"]):
+        wants_reply = False
+    wants_archive = any(term in text for term in ["archive", "ignore", "low priority", "safe to ignore"])
     terms = prompt_terms(prompt)
     target_matches = target_email_matches(prompt, terms)
     categories = [category for category in sorted({email["category"].lower() for email in SYNTHETIC_INBOX}) if category.lower() in text]
@@ -1512,6 +1929,44 @@ def build_inbox_prompt(prompt: str, intent: dict[str, Any], emails: list[dict[st
     )
 
 
+def build_inbox_plan_prompt(prompt: str, intent: dict[str, Any], emails: list[dict[str, Any]]) -> str:
+    payload = {
+        "user_prompt": prompt,
+        "intent": {
+            "count": intent["count"],
+            "wants_reply": intent["wants_reply"],
+            "wants_archive": intent["wants_archive"],
+            "wants_summary": intent["wants_summary"],
+            "categories": intent["categories"],
+            "direct_lookup": intent["direct_lookup"],
+            "matched_people": intent["matched_people"],
+        },
+        "mailbox": [plan_email(email) for email in emails],
+    }
+    return (
+        "Choose the next cascade route from this JSON. Return only the JSON plan. "
+        "Do not write the final answer.\n"
+        + json.dumps(payload, ensure_ascii=True)
+    )
+
+
+def plan_email(email: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": email["id"],
+        "from_name": email["from_name"],
+        "role": email["role"],
+        "subject": email["subject"],
+        "body": email["body"],
+        "category": email["category"],
+        "priority": email["priority"],
+        "urgency": email["urgency"],
+        "deadline": email["deadline"],
+        "needs_response": email["needs_response"],
+        "tags": email["tags"],
+        "expected_action": email["expected_action"],
+    }
+
+
 def model_email(email: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": email["id"],
@@ -1556,6 +2011,34 @@ def provider_output_from_payload(
     )
 
 
+def plan_output_from_payload(
+    provider: str,
+    model: str,
+    payload: Any,
+    raw: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> InboxPlanOutput:
+    if not isinstance(payload, dict):
+        return unavailable_plan_output(provider, model, "Model returned non-object planning JSON.", raw=raw)
+    strategy = str(payload.get("strategy") or "fallback_synthesis").strip()
+    valid_strategies = {"direct_answer", "summarize", "draft_replies", "archive", "action_plan", "fallback_synthesis"}
+    if strategy not in valid_strategies:
+        strategy = "fallback_synthesis"
+    return InboxPlanOutput(
+        provider=provider,
+        model=model,
+        selected_email_ids=unique_strings(payload.get("selected_email_ids")),
+        needs_llm=bool(payload.get("needs_llm")),
+        strategy=strategy,
+        rationale=str(payload.get("rationale") or "").strip()[:500],
+        raw=raw,
+        input_tokens=max(0, int(input_tokens or 0)),
+        output_tokens=max(0, int(output_tokens or 0)),
+        confidence=clamp_confidence(payload.get("confidence"), 0.5),
+    )
+
+
 def unavailable_output(provider: str, model: str, message: str, raw: str = "") -> InboxProviderOutput:
     return InboxProviderOutput(
         provider=provider,
@@ -1564,6 +2047,20 @@ def unavailable_output(provider: str, model: str, message: str, raw: str = "") -
         answer=message,
         drafts=[],
         operations=[],
+        raw=raw or message,
+        error=message,
+        confidence=0.0,
+    )
+
+
+def unavailable_plan_output(provider: str, model: str, message: str, raw: str = "") -> InboxPlanOutput:
+    return InboxPlanOutput(
+        provider=provider,
+        model=model,
+        selected_email_ids=[],
+        needs_llm=True,
+        strategy="fallback_synthesis",
+        rationale=message,
         raw=raw or message,
         error=message,
         confidence=0.0,
@@ -1971,19 +2468,29 @@ def evaluate_completion(
         },
     ]
     if matched_ids:
-        checks.append(
-            {
-                "label": "Matched prompt target",
-                "passed": matched_ids.issubset(selected_ids),
-                "detail": f"Expected {len(matched_ids)} target email{'s' if len(matched_ids) != 1 else ''}.",
-            }
-        )
         if intent.get("direct_lookup") or intent.get("targeted_lookup"):
+            checks.append(
+                {
+                    "label": "Matched prompt target",
+                    "passed": matched_ids.issubset(selected_ids),
+                    "detail": f"Expected {len(matched_ids)} target email{'s' if len(matched_ids) != 1 else ''}.",
+                }
+            )
             checks.append(
                 {
                     "label": "Avoided unrelated emails",
                     "passed": selected_ids.issubset(matched_ids),
                     "detail": "Direct lookups should cite only the requested sender or message.",
+                }
+            )
+        else:
+            overlap = len(selected_ids & matched_ids)
+            needed_overlap = max(1, min(len(matched_ids), round(len(matched_ids) * 0.7)))
+            checks.append(
+                {
+                    "label": "Covered important matches",
+                    "passed": overlap >= needed_overlap,
+                    "detail": f"Covered {overlap}/{len(matched_ids)} high-priority candidates.",
                 }
             )
     if intent["wants_reply"]:

@@ -28,6 +28,7 @@ from slm_agent_router.inbox_benchmark import (
     inbox_context_for_agent,
     inbox_snapshot,
     run_inbox_comparison,
+    select_emails,
 )
 from slm_agent_router.webui_benchmarks import normalize_report as normalize_webui_report
 from slm_agent_router.webui_benchmarks import webui_benchmark_report
@@ -460,7 +461,9 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["E-1005"], output.selected_email_ids)
         self.assertEqual(1, len(local.calls))
         self.assertEqual(0, len(fallback.calls))
-        self.assertTrue(any(event["label"] == "Validate local answer" for event in output.route_events))
+        labels = [event["label"] for event in output.route_events]
+        self.assertIn("Validate SLM plan", labels)
+        self.assertIn("Local compose", labels)
 
     async def test_inbox_cascade_retries_then_falls_back_after_weak_local_answers(self):
         prompt = "what did nora say"
@@ -498,8 +501,51 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(fallback.calls))
         labels = [event["label"] for event in output.route_events]
         self.assertIn("Retry/replan", labels)
-        self.assertIn("Openai fallback", labels)
+        self.assertIn("OpenAI synthesize", labels)
         self.assertGreater(output.cost_usd, 0)
+
+    async def test_inbox_cascade_uses_llm_only_for_selected_summary_context(self):
+        prompt = "Summarize the most important emails I need to respond to today."
+        intent = analyze_prompt(prompt)
+        matched_ids = [email["id"] for email in select_emails(prompt, intent, agent_id="evaluator")]
+        local_context = inbox_context_for_agent(prompt, intent, "cascade")
+        local = StaticInboxProvider(
+            [
+                inbox_provider_output(
+                    model="llama-test",
+                    ids=matched_ids,
+                    answer="",
+                    confidence=0.9,
+                )
+            ],
+            provider="ollama",
+            model="llama-test",
+        )
+        fallback = StaticInboxProvider(
+            [
+                inbox_provider_output(
+                    provider="openai",
+                    model="gpt-test",
+                    ids=matched_ids,
+                    answer="Maya Chen and Jordan Lee are important response targets today, along with the other selected deadline emails.",
+                    confidence=0.95,
+                )
+            ],
+            provider="openai",
+            model="gpt-test",
+        )
+        cascade = InboxCascadeProvider(local, [fallback], confidence_threshold=0.72, max_local_retries=1)
+
+        output = await cascade.complete(prompt, intent, local_context)
+
+        self.assertIn("-> openai:gpt-test", output.model)
+        self.assertEqual(1, len(local.calls))
+        self.assertEqual(1, len(fallback.calls))
+        self.assertEqual(len(matched_ids), fallback.calls[0]["messages"])
+        self.assertLess(fallback.calls[0]["messages"], 30)
+        labels = [event["label"] for event in output.route_events]
+        self.assertIn("Ollama plan 1", labels)
+        self.assertIn("OpenAI synthesize", labels)
 
 
 if __name__ == "__main__":
