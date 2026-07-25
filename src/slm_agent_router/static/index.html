@@ -3,220 +3,87 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SLM Cascade Benchmark</title>
+    <title>SLM Cascade Inbox Manager</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <main class="app-shell">
-      <header class="topbar">
+    <main class="app-shell inbox-app">
+      <header class="topbar inbox-topbar">
         <div class="brand-lockup">
           <div class="brand-mark" aria-hidden="true">SLM</div>
           <div>
-            <p class="eyebrow">Agent benchmark arena</p>
-            <h1>SLM Cascade Lab</h1>
-            <p class="subtitle">Side-by-side agent runs with live browsers, route telemetry, game tasks, and web UI benchmark traces.</p>
+            <p class="eyebrow">Inbox manager agent comparison</p>
+            <h1>SLM Cascade Inbox Lab</h1>
+            <p class="subtitle">Ask three agents to triage, summarize, and draft replies against the same synthetic mailbox.</p>
           </div>
         </div>
-        <div class="run-total" id="run-total">Idle</div>
+        <div class="run-total" id="run-total">Synthetic inbox</div>
       </header>
 
-      <nav class="mode-tabs" aria-label="Benchmark mode">
-        <button class="mode-tab active" type="button" data-view="browser-view">Browser race</button>
-        <button class="mode-tab" type="button" data-view="gameworld-view">GameWorld benchmark</button>
-        <button class="mode-tab" type="button" data-view="webui-view">Web UI benchmarks</button>
-      </nav>
+      <section class="inbox-hero" aria-label="Inbox manager overview">
+        <div>
+          <p class="eyebrow">Synthetic executive inbox</p>
+          <h2>Compare SLM Cascade, OpenAI, and Claude on email management tasks</h2>
+          <p>Each prompt runs against a detailed inbox with deadlines, customer risk, investor asks, finance approvals, legal redlines, incidents, and low-priority noise. Results show time, token usage, cost, and evaluator effectiveness.</p>
+        </div>
+        <div class="inbox-metrics" id="inbox-metrics" aria-label="Mailbox metrics"></div>
+      </section>
 
-      <section id="browser-view" class="view active">
-        <section class="controls" aria-label="Benchmark controls">
-          <div class="controls-head">
+      <section class="inbox-layout">
+        <aside class="mailbox-panel" aria-label="Synthetic inbox">
+          <div class="mailbox-head">
             <div>
-              <p class="eyebrow">Live browser race</p>
-              <h2>Run the same task across selected agents</h2>
+              <p class="eyebrow">Mailbox</p>
+              <h2>Inbox snapshot</h2>
             </div>
-            <div class="control-status">
-              <span>Timeout 75s</span>
-              <span>Parallel browsers</span>
-            </div>
+            <button id="reset-view" type="button">Reset</button>
           </div>
-          <label class="prompt-field">
-            <span>Task prompt</span>
-            <textarea id="task" rows="3">Go to https://example.com and report the page heading.</textarea>
+          <label class="mail-search">
+            <span>Search</span>
+            <input id="mail-search" type="search" placeholder="sender, subject, tag">
           </label>
-          <div class="control-grid">
-            <label>
-              <span>Start URL</span>
-              <input id="start-url" type="url" placeholder="Optional">
-            </label>
-            <button id="run" type="button">Run comparison</button>
-          </div>
-          <details class="keys">
-            <summary>Use my API keys for this run</summary>
-            <div class="key-grid">
-              <label>
-                <span>OpenAI API key</span>
-                <input id="openai-key" type="password" autocomplete="off" placeholder="Optional">
-              </label>
-              <label>
-                <span>Anthropic API key</span>
-                <input id="anthropic-key" type="password" autocomplete="off" placeholder="Optional">
-              </label>
-            </div>
-          </details>
-          <fieldset class="agents">
-            <legend>Agents</legend>
-            <label class="agent-option"><input type="checkbox" name="agent" value="cascade" checked><span class="agent-name">SLM Cascade</span><small id="model-cascade"></small></label>
-            <label class="agent-option"><input type="checkbox" name="agent" value="openai" checked><span class="agent-name">OpenAI</span><small id="model-openai"></small></label>
-            <label class="agent-option"><input type="checkbox" name="agent" value="claude" checked><span class="agent-name">Claude</span><small id="model-claude"></small></label>
-          </fieldset>
-        </section>
+          <div class="mail-filters" id="mail-filters" aria-label="Inbox filters"></div>
+          <div class="mail-list" id="mail-list"></div>
+        </aside>
 
-        <section class="summary" id="summary" aria-live="polite"></section>
-        <section class="board" id="board" aria-label="Agent browser comparison"></section>
-      </section>
+        <section class="workspace-panel" aria-label="Agent prompt workspace">
+          <section class="email-detail" id="email-detail" aria-label="Selected email"></section>
 
-      <section id="gameworld-view" class="view">
-        <section class="gameworld-hero" aria-label="GameWorld benchmark overview">
-          <div>
-            <p class="eyebrow">GameWorld benchmark</p>
-            <h2>Game agents compared by success, speed, and token cost</h2>
-            <p class="gameworld-copy">GameWorld evaluates multimodal agents across browser games with state-verifiable outcomes. This dashboard compares the cascade, OpenAI, and Claude on score, time, actions, and cost per successful task.</p>
-          </div>
-          <div class="report-source" id="gameworld-source">Loading report</div>
-        </section>
-
-        <section class="playback-panel" aria-label="GameWorld task playback">
-          <div class="playback-head">
-            <div>
-              <p class="eyebrow">Benchmark playback</p>
-              <h2>Watch each model work through a selected task</h2>
-            </div>
-            <div class="playback-tabs" id="playback-tabs" role="tablist" aria-label="Playback task"></div>
-          </div>
-          <div class="playback-stage" id="playback-stage"></div>
-        </section>
-
-        <section class="scorecards" id="gameworld-cards" aria-label="GameWorld summary cards"></section>
-
-        <section class="chart-grid" aria-label="GameWorld charts">
-          <article class="chart-panel">
-            <h2>Pass Rate</h2>
-            <div class="bar-chart" id="pass-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Median Time</h2>
-            <div class="bar-chart inverse" id="time-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Token Cost</h2>
-            <div class="bar-chart inverse" id="cost-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Cost Per Success</h2>
-            <div class="bar-chart inverse" id="cost-success-chart"></div>
-          </article>
-        </section>
-
-        <section class="game-grid" id="game-grid" aria-label="Per-game model scores"></section>
-
-        <section class="trace-panel" aria-label="Representative GameWorld run timeline">
-          <div class="trace-head">
-            <h2>Representative Run Timeline</h2>
-            <p>Route lanes show where the cascade spends cheap local actions versus LLM fallback actions.</p>
-          </div>
-          <div class="trace-lanes" id="trace-lanes"></div>
-        </section>
-      </section>
-
-      <section id="webui-view" class="view">
-        <section class="webui-hero" aria-label="Web UI benchmark overview">
-          <div>
-            <p class="eyebrow">Web UI benchmarks</p>
-            <h2>Watch agents complete browser tasks from established benchmark suites</h2>
-            <p class="gameworld-copy">Select MiniWoB++, WebArena, VisualWebArena, or WorkArena to inspect the task trace, compare route decisions, and see token cost per model.</p>
-          </div>
-          <div class="report-source" id="webui-source">Loading report</div>
-        </section>
-
-        <section class="webui-lab" aria-label="Web UI benchmark task explorer">
-          <div class="webui-head">
-            <div>
-              <p class="eyebrow">Task explorer</p>
-              <h2>Select a benchmark suite</h2>
-            </div>
-            <div class="webui-suite-tabs" id="webui-suite-tabs" role="tablist" aria-label="Web UI benchmark suite"></div>
-          </div>
-          <section class="scorecards" id="webui-cards" aria-label="Web UI benchmark summary cards"></section>
-          <div class="webui-workbench">
-            <aside class="webui-task-list" id="webui-task-list" aria-label="Benchmark tasks"></aside>
-            <section class="webui-replay" aria-label="Selected benchmark replay">
-              <div class="webui-replay-head">
-                <div id="webui-task-title"></div>
-                <div class="webui-controls">
-                  <button id="webui-play" type="button">Pause</button>
-                  <label>
-                    <span>Step</span>
-                    <input id="webui-scrubber" type="range" min="0" max="0" value="0">
-                  </label>
-                  <output id="webui-scrubber-value">1 / 1</output>
-                </div>
+          <section class="composer-panel" aria-label="Agent chat prompt">
+            <div class="composer-head">
+              <div>
+                <p class="eyebrow">Chat with all agents</p>
+                <h2>Send one inbox task to all three agents</h2>
               </div>
-              <div class="webui-stage" id="webui-stage"></div>
-            </section>
-          </div>
-        </section>
+              <div class="agent-key">
+                <span class="route-chip slm">SLM Cascade</span>
+                <span class="route-chip llm">OpenAI</span>
+                <span class="route-chip safety">Claude</span>
+              </div>
+            </div>
+            <div class="prompt-chips" id="prompt-chips"></div>
+            <label class="prompt-field">
+              <span>Prompt</span>
+              <textarea id="inbox-prompt" rows="4">Summarize the most important emails I need to respond to today.</textarea>
+            </label>
+            <div class="composer-actions">
+              <button id="run-inbox" type="button">Run inbox agents</button>
+              <div class="composer-status" id="composer-status">Ready</div>
+            </div>
+          </section>
 
-        <section class="chart-grid" aria-label="Web UI benchmark charts">
-          <article class="chart-panel">
-            <h2>Success Rate</h2>
-            <div class="bar-chart" id="webui-success-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Median Time</h2>
-            <div class="bar-chart inverse" id="webui-time-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Avg Tokens</h2>
-            <div class="bar-chart inverse" id="webui-token-chart"></div>
-          </article>
-          <article class="chart-panel">
-            <h2>Cost Per Success</h2>
-            <div class="bar-chart inverse" id="webui-cost-success-chart"></div>
-          </article>
+          <section class="run-summary" id="run-summary" aria-live="polite"></section>
+          <section class="agent-results" id="agent-results" aria-label="Agent comparison results"></section>
+          <section class="history-panel" aria-label="Prompt history">
+            <div class="trace-head">
+              <h2>Prompt History</h2>
+              <p>Each run is kept locally in this browser session.</p>
+            </div>
+            <div id="run-history" class="run-history"></div>
+          </section>
         </section>
-
-        <section class="webui-suite-grid" id="webui-suite-grid" aria-label="Per-suite token cost comparison"></section>
       </section>
     </main>
-    <template id="agent-template">
-      <article class="agent-panel">
-        <div class="panel-head">
-          <div>
-            <h2></h2>
-            <p class="model"></p>
-          </div>
-          <div class="status">Queued</div>
-        </div>
-        <div class="meta">
-          <span class="timer">0.0s</span>
-          <span class="steps">0 steps</span>
-          <span class="badge"></span>
-        </div>
-        <div class="routing-summary" aria-label="Routing choices">
-          <span class="route-count slm"><b>0</b> SLM</span>
-          <span class="route-count llm"><b>0</b> LLM</span>
-        </div>
-        <div class="viewport">
-          <img alt="">
-          <div class="empty">Waiting for browser</div>
-        </div>
-        <div class="page-line">
-          <span class="page-title"></span>
-          <a class="url" target="_blank" rel="noreferrer"></a>
-        </div>
-        <ol class="log"></ol>
-        <p class="answer"></p>
-      </article>
-    </template>
     <script src="/static/app.js" defer></script>
   </body>
 </html>

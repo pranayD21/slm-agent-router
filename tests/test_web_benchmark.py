@@ -20,6 +20,7 @@ from slm_agent_router.web_benchmark import (
     validate_action,
 )
 from slm_agent_router.gameworld import gameworld_report, normalize_report
+from slm_agent_router.inbox_benchmark import inbox_snapshot, run_inbox_comparison
 from slm_agent_router.webui_benchmarks import normalize_report as normalize_webui_report
 from slm_agent_router.webui_benchmarks import webui_benchmark_report
 import asyncio
@@ -340,6 +341,29 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["mode"], "imported")
         self.assertEqual(report["suites"][0]["success"]["cascade"], 1.0)
         self.assertEqual(report["playbacks"][0]["suite"], "miniwob")
+
+    def test_inbox_snapshot_is_detailed(self):
+        snapshot = inbox_snapshot()
+        self.assertGreaterEqual(snapshot["stats"]["total"], 30)
+        self.assertGreaterEqual(snapshot["stats"]["needs_response"], 20)
+        self.assertIn("Customer", snapshot["categories"])
+        self.assertGreaterEqual(len(snapshot["suggested_prompts"]), 4)
+
+    async def test_inbox_run_compares_three_agents(self):
+        run = await run_inbox_comparison("Summarize the most important emails I need to respond to today.")
+        self.assertEqual({"cascade", "openai", "claude"}, {result["agent_id"] for result in run["results"]})
+        self.assertIn("highest_effectiveness", run["winner"])
+        for result in run["results"]:
+            self.assertGreater(result["runtime_ms"], 0)
+            self.assertGreater(result["tokens"], 0)
+            self.assertGreaterEqual(result["effectiveness"], 1)
+            self.assertGreaterEqual(len(result["selected_emails"]), 1)
+
+    async def test_inbox_reply_prompt_creates_drafts(self):
+        run = await run_inbox_comparison("Draft replies to the 3 highest priority customer emails.")
+        for result in run["results"]:
+            self.assertGreaterEqual(len(result["drafts"]), 1)
+            self.assertLessEqual(len(result["drafts"]), 3)
 
 
 if __name__ == "__main__":

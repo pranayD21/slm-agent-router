@@ -12,6 +12,7 @@ from typing import Any
 from starlette.requests import Request
 
 from .gameworld import gameworld_report
+from .inbox_benchmark import inbox_snapshot, run_inbox_comparison
 from .web_benchmark import build_agent_configs, provider_status, run_benchmark
 from .webui_benchmarks import webui_benchmark_report
 
@@ -134,7 +135,7 @@ def create_app():
             "The web app dependencies are not installed. Run `python3 -m pip install -e '.[web]'`."
         ) from exc
 
-    app = FastAPI(title="SLM Agent Router Browser Benchmark")
+    app = FastAPI(title="SLM Cascade Inbox Manager")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/")
@@ -159,6 +160,17 @@ def create_app():
     @app.get("/api/webui-benchmarks")
     async def webui_benchmarks():
         return JSONResponse(webui_benchmark_report())
+
+    @app.get("/api/inbox")
+    async def inbox():
+        return JSONResponse(inbox_snapshot())
+
+    @app.post("/api/inbox/runs")
+    async def start_inbox_run(payload: dict[str, Any]):
+        try:
+            return JSONResponse(await run_inbox_comparison(str(payload.get("prompt", ""))))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/runs")
     async def start_run(payload: dict[str, Any], request: Request):
