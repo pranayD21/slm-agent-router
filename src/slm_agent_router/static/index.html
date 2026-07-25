@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SLM Cascade Benchmark</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <div>
+          <h1>Browser Agent Benchmark</h1>
+          <p class="subtitle">SLM Cascade vs frontier browser agents</p>
+        </div>
+        <div class="run-total" id="run-total">Idle</div>
+      </header>
+
+      <section class="controls" aria-label="Benchmark controls">
+        <label class="prompt-field">
+          <span>Task prompt</span>
+          <textarea id="task" rows="3">Go to https://example.com and report the page heading.</textarea>
+        </label>
+        <div class="control-grid">
+          <label>
+            <span>Start URL</span>
+            <input id="start-url" type="url" placeholder="Optional">
+          </label>
+          <label>
+            <span>Max steps</span>
+            <input id="max-steps" type="number" min="1" max="40" value="12">
+          </label>
+          <button id="run" type="button">Run comparison</button>
+        </div>
+        <details class="keys">
+          <summary>Use my API keys for this run</summary>
+          <div class="key-grid">
+            <label>
+              <span>OpenAI API key</span>
+              <input id="openai-key" type="password" autocomplete="off" placeholder="Optional">
+            </label>
+            <label>
+              <span>Anthropic API key</span>
+              <input id="anthropic-key" type="password" autocomplete="off" placeholder="Optional">
+            </label>
+          </div>
+        </details>
+        <fieldset class="agents">
+          <legend>Agents</legend>
+          <label><input type="checkbox" name="agent" value="cascade" checked> SLM Cascade <small id="model-cascade"></small></label>
+          <label><input type="checkbox" name="agent" value="openai" checked> OpenAI <small id="model-openai"></small></label>
+          <label><input type="checkbox" name="agent" value="claude" checked> Claude <small id="model-claude"></small></label>
+        </fieldset>
+      </section>
+
+      <section class="summary" id="summary" aria-live="polite"></section>
+      <section class="board" id="board" aria-label="Agent browser comparison"></section>
+    </main>
+    <template id="agent-template">
+      <article class="agent-panel">
+        <div class="panel-head">
+          <div>
+            <h2></h2>
+            <p class="model"></p>
+          </div>
+          <div class="status">Queued</div>
+        </div>
+        <div class="meta">
+          <span class="timer">0.0s</span>
+          <span class="steps">0 steps</span>
+          <span class="badge"></span>
+        </div>
+        <div class="viewport">
+          <img alt="">
+          <div class="empty">Waiting for browser</div>
+        </div>
+        <div class="page-line">
+          <span class="page-title"></span>
+          <a class="url" target="_blank" rel="noreferrer"></a>
+        </div>
+        <ol class="log"></ol>
+        <p class="answer"></p>
+      </article>
+    </template>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
