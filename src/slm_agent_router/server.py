@@ -13,6 +13,7 @@ from starlette.requests import Request
 
 from .gameworld import gameworld_report
 from .web_benchmark import build_agent_configs, provider_status, run_benchmark
+from .webui_benchmarks import webui_benchmark_report
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -154,6 +155,10 @@ def create_app():
     @app.get("/api/gameworld")
     async def gameworld():
         return JSONResponse(gameworld_report())
+
+    @app.get("/api/webui-benchmarks")
+    async def webui_benchmarks():
+        return JSONResponse(webui_benchmark_report())
 
     @app.post("/api/runs")
     async def start_run(payload: dict[str, Any], request: Request):

@@ -608,7 +608,8 @@ button:disabled {
   background: #fbfcfe;
 }
 
-.gameworld-hero {
+.gameworld-hero,
+.webui-hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
@@ -627,7 +628,8 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.gameworld-hero h2 {
+.gameworld-hero h2,
+.webui-hero h2 {
   margin-top: 2px;
   font-size: 22px;
   line-height: 1.15;
@@ -661,6 +663,8 @@ button:disabled {
 .chart-panel,
 .game-card,
 .playback-panel,
+.webui-lab,
+.webui-suite-card,
 .trace-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1013,6 +1017,422 @@ button:disabled {
   font-weight: 800;
 }
 
+.webui-lab {
+  margin: 12px 0;
+  padding: 14px;
+}
+
+.webui-head,
+.webui-replay-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.webui-head {
+  align-items: start;
+}
+
+.webui-head h2,
+.webui-replay-head h2 {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.webui-suite-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.webui-suite-tab,
+.webui-task-button {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.webui-suite-tab {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.webui-suite-tab.active,
+.webui-task-button.active {
+  border-color: #0f6848;
+  background: var(--green);
+  color: #fff;
+}
+
+.webui-workbench {
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.webui-task-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.webui-task-button {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 58px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.webui-task-button span {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 900;
+  text-transform: none;
+}
+
+.webui-task-button small {
+  color: currentColor;
+  opacity: 0.82;
+}
+
+.webui-replay {
+  min-width: 0;
+}
+
+.webui-replay-head {
+  align-items: end;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.webui-replay-head p {
+  color: var(--muted);
+}
+
+.webui-controls {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 220px) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.webui-controls button {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.webui-controls label {
+  display: grid;
+  gap: 4px;
+}
+
+.webui-controls input {
+  padding: 0;
+  accent-color: var(--green);
+}
+
+.webui-controls output {
+  align-self: end;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.webui-stage {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.webui-agent-card {
+  min-width: 0;
+}
+
+.webui-screen {
+  min-height: 330px;
+  border-bottom: 1px solid var(--line);
+  background: #e9eef4;
+}
+
+.webui-browser-bar {
+  display: grid;
+  grid-template-columns: 9px 9px 9px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  min-height: 30px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fafc;
+}
+
+.webui-browser-bar span {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #c5ced9;
+}
+
+.webui-browser-bar b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.webui-page {
+  display: grid;
+  gap: 10px;
+  min-height: 300px;
+  padding: 12px;
+  background: #fff;
+}
+
+.webui-page-head {
+  display: grid;
+  gap: 2px;
+}
+
+.webui-page-head h3 {
+  font-size: 16px;
+}
+
+.webui-page-head p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.webui-elements {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.webui-toolbar,
+.webui-field,
+.webui-button,
+.webui-message,
+.webui-reference {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.webui-toolbar {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.webui-field {
+  display: grid;
+  gap: 3px;
+  min-height: 48px;
+  padding: 8px 10px;
+}
+
+.webui-field.active {
+  border-color: #88b7a5;
+  background: #eff8f4;
+}
+
+.webui-field span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.webui-field b {
+  min-height: 18px;
+  overflow-wrap: anywhere;
+  font-weight: 850;
+}
+
+.webui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  min-width: 110px;
+  min-height: 34px;
+  padding: 7px 12px;
+  color: #fff;
+  background: var(--green);
+  border-color: #0f6848;
+  font-weight: 900;
+}
+
+.webui-button.active {
+  box-shadow: 0 0 0 3px rgba(18, 116, 87, 0.18);
+}
+
+.webui-message {
+  padding: 8px 10px;
+  color: var(--green);
+  background: #edf9f3;
+  border-color: #b6dec9;
+  font-weight: 900;
+}
+
+.webui-table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.webui-table th,
+.webui-table td {
+  padding: 8px;
+  border-bottom: 1px solid #e5ebf2;
+  text-align: left;
+}
+
+.webui-table th {
+  color: var(--muted);
+  background: #f4f7fa;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.webui-table tr.active td {
+  background: #eff8f4;
+  color: var(--green);
+  font-weight: 900;
+}
+
+.webui-reference {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.webui-reference i,
+.webui-product i {
+  display: block;
+  border-radius: 6px;
+}
+
+.webui-reference i {
+  width: 48px;
+  height: 38px;
+  background: linear-gradient(135deg, #b49b55 0 45%, #306f49 45% 100%);
+}
+
+.webui-product-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.webui-product {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.webui-product.selected {
+  border-color: #88b7a5;
+  background: #eff8f4;
+  box-shadow: 0 0 0 3px rgba(18, 116, 87, 0.12);
+}
+
+.webui-product i {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #cdd5de;
+}
+
+.webui-product i.dark {
+  background: linear-gradient(135deg, #222b36, #77808c);
+}
+
+.webui-product i.green {
+  background: linear-gradient(135deg, #b49b55 0 45%, #306f49 45% 100%);
+}
+
+.webui-product i.light {
+  background: linear-gradient(135deg, #edf1f5, #d9b782);
+}
+
+.webui-product b,
+.webui-product span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.webui-product span {
+  color: var(--muted);
+}
+
+.webui-token-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  padding: 9px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.webui-token-strip span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.webui-suite-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.webui-suite-card {
+  padding: 12px;
+}
+
+.webui-suite-row {
+  display: grid;
+  grid-template-columns: 92px minmax(80px, 1fr) 58px 48px;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0;
+  font-size: 12px;
+}
+
+.webui-suite-row b {
+  text-align: right;
+}
+
+.webui-suite-row small {
+  color: var(--muted);
+}
+
 .scorecard {
   display: grid;
   gap: 2px;
@@ -1223,8 +1643,13 @@ button:disabled {
   .control-grid,
   .key-grid,
   .gameworld-hero,
+  .webui-hero,
   .scorecards,
   .chart-grid,
+  .webui-head,
+  .webui-workbench,
+  .webui-replay-head,
+  .webui-stage,
   .trace-head {
     grid-template-columns: 1fr;
     display: grid;
@@ -1240,7 +1665,8 @@ button:disabled {
 
   .mode-tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
+    width: 100%;
   }
 
   .report-source {
@@ -1255,6 +1681,27 @@ button:disabled {
 
   .playback-tabs {
     justify-content: start;
+  }
+
+  .webui-suite-tabs {
+    justify-content: start;
+  }
+
+  .webui-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .webui-token-strip,
+  .webui-suite-row {
+    grid-template-columns: 1fr;
+  }
+
+  .webui-suite-row b {
+    text-align: left;
+  }
+
+  .webui-product-grid {
+    grid-template-columns: 1fr;
   }
 
   .playback-grid {

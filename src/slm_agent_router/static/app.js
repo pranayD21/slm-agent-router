@@ -11,6 +11,16 @@ const gameGrid = document.querySelector("#game-grid");
 const traceLanes = document.querySelector("#trace-lanes");
 const playbackTabs = document.querySelector("#playback-tabs");
 const playbackStage = document.querySelector("#playback-stage");
+const webuiCards = document.querySelector("#webui-cards");
+const webuiSource = document.querySelector("#webui-source");
+const webuiSuiteTabs = document.querySelector("#webui-suite-tabs");
+const webuiTaskList = document.querySelector("#webui-task-list");
+const webuiTaskTitle = document.querySelector("#webui-task-title");
+const webuiStage = document.querySelector("#webui-stage");
+const webuiPlay = document.querySelector("#webui-play");
+const webuiScrubber = document.querySelector("#webui-scrubber");
+const webuiScrubberValue = document.querySelector("#webui-scrubber-value");
+const webuiSuiteGrid = document.querySelector("#webui-suite-grid");
 const panels = new Map();
 let eventSource = null;
 let timers = new Map();
@@ -20,6 +30,12 @@ let serverConfig = {};
 let playbackTimer = null;
 let activePlayback = null;
 let activePlaybackStep = 0;
+let webuiReport = null;
+let activeWebuiSuiteId = "";
+let activeWebuiPlaybackId = "";
+let activeWebuiStep = 0;
+let webuiTimer = null;
+let webuiPlaying = true;
 
 const labels = {
   cascade: "SLM Cascade",
@@ -50,13 +66,19 @@ async function loadGameWorld() {
   renderGameWorld(report);
 }
 
+async function loadWebUiBenchmarks() {
+  const response = await fetch("/api/webui-benchmarks");
+  const report = await response.json();
+  renderWebUiBenchmarks(report);
+}
+
 function initializeTabs() {
   modeTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       const target = tab.dataset.view;
       modeTabs.forEach((item) => item.classList.toggle("active", item === tab));
       views.forEach((view) => view.classList.toggle("active", view.id === target));
-      total.textContent = target === "gameworld-view" ? "GameWorld" : "Idle";
+      total.textContent = target === "gameworld-view" ? "GameWorld" : target === "webui-view" ? "Web UI" : "Idle";
     });
   });
 }
@@ -547,6 +569,281 @@ function formatInventory(items) {
   return Array.isArray(items) && items.length ? items.join(", ") : "empty";
 }
 
+function renderWebUiBenchmarks(report) {
+  webuiReport = report;
+  const suites = report.suites || [];
+  const models = report.models || [];
+  if (!webuiSource) return;
+  webuiSource.textContent = `${report.mode === "demo" ? "Demo report" : "Imported report"} · ${report.summary?.suites || suites.length} suites · ${report.summary?.tasks || 0} tasks`;
+  if (!activeWebuiSuiteId || !suites.some((suite) => suite.id === activeWebuiSuiteId)) {
+    activeWebuiSuiteId = suites[0]?.id || "";
+  }
+  renderWebUiSuiteTabs(suites);
+  renderWebUiSuite(activeWebuiSuiteId, models);
+}
+
+function renderWebUiSuiteTabs(suites) {
+  if (!webuiSuiteTabs) return;
+  webuiSuiteTabs.innerHTML = suites
+    .map(
+      (suite) => `<button class="webui-suite-tab${suite.id === activeWebuiSuiteId ? " active" : ""}" type="button" role="tab" aria-selected="${suite.id === activeWebuiSuiteId ? "true" : "false"}" data-suite="${escapeHtml(suite.id)}">
+        ${escapeHtml(suite.name)}
+      </button>`
+    )
+    .join("");
+  webuiSuiteTabs.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeWebuiSuiteId = button.dataset.suite || "";
+      activeWebuiPlaybackId = "";
+      activeWebuiStep = 0;
+      webuiPlaying = true;
+      renderWebUiBenchmarks(webuiReport);
+    });
+  });
+}
+
+function renderWebUiSuite(suiteId, models) {
+  const suite = (webuiReport?.suites || []).find((item) => item.id === suiteId) || (webuiReport?.suites || [])[0];
+  if (!suite) return;
+  const suiteModels = models.map((model) => ({
+    ...model,
+    success_rate: Number(suite.success?.[model.id] || 0),
+    pass_rate: Number(suite.success?.[model.id] || 0),
+    median_time_s: Number(suite.median_time_s?.[model.id] || 0),
+    avg_tokens: Number(suite.avg_tokens?.[model.id] || 0),
+    estimated_cost_usd: Number(suite.cost_usd?.[model.id] || 0),
+    cost_per_success_usd: Number(suite.cost_per_success_usd?.[model.id] || 0),
+  }));
+  const leader = bestBy(suiteModels, "success_rate");
+  const cheapest = cheapestModel(suiteModels);
+  const fastest = fastestModel(suiteModels);
+  if (webuiCards) {
+    webuiCards.innerHTML = [
+      metricCard("Suite", suite.name, `${suite.tasks || 0} tasks`),
+      metricCard("Leader", leader?.label || "n/a", `${formatPercent(leader?.success_rate || 0)} success`),
+      metricCard("Best cost per win", cheapest?.label || "n/a", `$${formatMoney(cheapest?.cost_per_success_usd || 0)}`),
+      metricCard("Fastest median", fastest?.label || "n/a", `${formatNumber(fastest?.median_time_s || 0)}s`),
+    ].join("");
+  }
+
+  renderBarChart("#webui-success-chart", suiteModels, "success_rate", { suffix: "%", higherIsBetter: true });
+  renderBarChart("#webui-time-chart", suiteModels, "median_time_s", { suffix: "s", higherIsBetter: false });
+  renderBarChart("#webui-token-chart", suiteModels, "avg_tokens", { suffix: " tokens", higherIsBetter: false });
+  renderBarChart("#webui-cost-success-chart", suiteModels, "cost_per_success_usd", { prefix: "$", higherIsBetter: false });
+  renderWebUiSuiteGrid(webuiReport?.suites || [], models);
+  renderWebUiTaskList(suiteId, models);
+}
+
+function renderWebUiTaskList(suiteId, models) {
+  const playbacks = (webuiReport?.playbacks || []).filter((playback) => playback.suite === suiteId);
+  if (!activeWebuiPlaybackId || !playbacks.some((playback) => playback.id === activeWebuiPlaybackId)) {
+    activeWebuiPlaybackId = playbacks[0]?.id || "";
+  }
+  if (webuiTaskList) {
+    webuiTaskList.innerHTML = playbacks
+      .map(
+        (playback) => `<button class="webui-task-button${playback.id === activeWebuiPlaybackId ? " active" : ""}" type="button" data-task="${escapeHtml(playback.id)}">
+          <span>${escapeHtml(playback.name)}</span>
+          <small>${escapeHtml(playback.surface || playback.task || "")}</small>
+        </button>`
+      )
+      .join("");
+    webuiTaskList.querySelectorAll("button").forEach((button) => {
+      button.addEventListener("click", () => {
+        activeWebuiPlaybackId = button.dataset.task || "";
+        activeWebuiStep = 0;
+        webuiPlaying = true;
+        renderWebUiTaskList(suiteId, models);
+      });
+    });
+  }
+  const playback = playbacks.find((item) => item.id === activeWebuiPlaybackId) || playbacks[0];
+  selectWebUiPlayback(playback, models);
+}
+
+function selectWebUiPlayback(playback, models) {
+  if (!playback) {
+    if (webuiStage) webuiStage.innerHTML = `<div class="playback-empty">No web UI task traces loaded.</div>`;
+    return;
+  }
+  activeWebuiPlaybackId = playback.id;
+  activeWebuiStep = Math.min(activeWebuiStep, Math.max(webUiFrameCount(playback) - 1, 0));
+  renderWebUiPlayback(playback, models);
+  startWebUiTimer(playback, models);
+}
+
+function startWebUiTimer(playback, models) {
+  if (webuiTimer) window.clearInterval(webuiTimer);
+  if (!webuiPlaying || webUiFrameCount(playback) <= 1) return;
+  webuiTimer = window.setInterval(() => {
+    const count = webUiFrameCount(playback);
+    activeWebuiStep = (activeWebuiStep + 1) % count;
+    renderWebUiPlayback(playback, models);
+  }, 1450);
+}
+
+function renderWebUiPlayback(playback, models) {
+  const frameCount = Math.max(webUiFrameCount(playback), 1);
+  if (webuiTaskTitle) {
+    webuiTaskTitle.innerHTML = `<p class="eyebrow">${escapeHtml(playback.surface || "Web task")}</p>
+      <h2>${escapeHtml(playback.name)}</h2>
+      <p>${escapeHtml(playback.task || "")}</p>`;
+  }
+  if (webuiScrubber) {
+    webuiScrubber.max = String(frameCount - 1);
+    webuiScrubber.value = String(Math.min(activeWebuiStep, frameCount - 1));
+  }
+  if (webuiScrubberValue) {
+    webuiScrubberValue.textContent = `${Math.min(activeWebuiStep + 1, frameCount)} / ${frameCount}`;
+  }
+  if (webuiPlay) webuiPlay.textContent = webuiPlaying ? "Pause" : "Play";
+  if (!webuiStage) return;
+  webuiStage.innerHTML = models
+    .map((model) => renderWebUiAgentCard(playback, model, activeWebuiStep))
+    .join("");
+}
+
+function renderWebUiAgentCard(playback, model, stepIndex) {
+  const data = playback.models?.[model.id] || {};
+  const frames = Array.isArray(data.frames) ? data.frames : [];
+  const frame = frames[Math.min(stepIndex, Math.max(frames.length - 1, 0))] || {};
+  const routeKind = playbackRouteKind(frame.route || (model.id === "cascade" ? "SLM" : "LLM"));
+  const step = Number(frame.step || Math.min(stepIndex + 1, frames.length || 1));
+  const progress = frames.length ? ((Math.min(stepIndex, frames.length - 1) + 1) / frames.length) * 100 : 0;
+  return `<article class="webui-agent-card playback-card" data-model="${escapeHtml(model.id)}">
+    <div class="playback-card-head">
+      <div>
+        <h3>${escapeHtml(model.label || labels[model.id] || model.id)}</h3>
+        <p>${escapeHtml(data.outcome || "Task in progress")}</p>
+      </div>
+      <span>${formatNumber(data.time_s || 0)}s</span>
+    </div>
+    ${renderWebUiScreen(frame.screen || {})}
+    <div class="playback-action">
+      <span class="route-chip ${routeKind}">${routeKind === "slm" ? "SLM" : "LLM"}</span>
+      <b>Step ${step}</b>
+      <span>${escapeHtml(frame.action || "observe")}</span>
+    </div>
+    <div class="playback-progress" aria-label="Task progress"><i style="width:${progress.toFixed(2)}%"></i></div>
+    <div class="webui-token-strip">
+      <span>Step ${formatNumber(frame.tokens || 0)} tokens</span>
+      <span>Total ${formatNumber(data.tokens || 0)}</span>
+      <span>$${formatMoney(data.cost_usd || 0)}</span>
+    </div>
+  </article>`;
+}
+
+function renderWebUiScreen(screen) {
+  return `<div class="webui-screen">
+    <div class="webui-browser-bar">
+      <span></span><span></span><span></span>
+      <b>${escapeHtml(screen.address || "benchmark.local")}</b>
+    </div>
+    <div class="webui-page">
+      <div class="webui-page-head">
+        <h3>${escapeHtml(screen.title || "Web task")}</h3>
+        <p>${escapeHtml(screen.notice || "")}</p>
+      </div>
+      <div class="webui-elements">
+        ${(screen.elements || []).map(renderWebUiElement).join("")}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderWebUiElement(element) {
+  if (element.kind === "toolbar") {
+    return `<div class="webui-toolbar">${escapeHtml(element.text || "")}</div>`;
+  }
+  if (element.kind === "field") {
+    return `<div class="webui-field ${escapeHtml(element.state || "")}">
+      <span>${escapeHtml(element.label || "")}</span>
+      <b>${escapeHtml(element.value || " ")}</b>
+    </div>`;
+  }
+  if (element.kind === "button") {
+    return `<div class="webui-button ${escapeHtml(element.state || "")}">${escapeHtml(element.text || "Button")}</div>`;
+  }
+  if (element.kind === "message") {
+    return `<div class="webui-message ${escapeHtml(element.state || "")}">${escapeHtml(element.text || "")}</div>`;
+  }
+  if (element.kind === "table") {
+    return renderWebUiTable(element);
+  }
+  if (element.kind === "cards") {
+    return renderWebUiCards(element.items || []);
+  }
+  if (element.kind === "visual-reference") {
+    return `<div class="webui-reference"><i></i><span>${escapeHtml(element.text || "Reference")}</span></div>`;
+  }
+  return `<div class="webui-toolbar">${escapeHtml(element.text || "")}</div>`;
+}
+
+function renderWebUiTable(table) {
+  const columns = table.columns || [];
+  const rows = table.rows || [];
+  return `<table class="webui-table">
+    <thead><tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
+    <tbody>
+      ${rows
+        .map(
+          (row, index) => `<tr class="${index === Number(table.activeRow) ? "active" : ""}">
+            ${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}
+          </tr>`
+        )
+        .join("")}
+    </tbody>
+  </table>`;
+}
+
+function renderWebUiCards(items) {
+  return `<div class="webui-product-grid">
+    ${items
+      .map(
+        (item) => `<div class="webui-product ${item.selected ? "selected" : ""}">
+          <i class="${escapeHtml(item.tone || "neutral")}"></i>
+          <b>${escapeHtml(item.title || "")}</b>
+          <span>${escapeHtml(item.meta || "")}</span>
+        </div>`
+      )
+      .join("")}
+  </div>`;
+}
+
+function renderWebUiSuiteGrid(suites, models) {
+  if (!webuiSuiteGrid) return;
+  webuiSuiteGrid.innerHTML = suites
+    .map((suite) => {
+      const rows = models
+        .map((model) => {
+          const tokens = Number(suite.avg_tokens?.[model.id] || 0);
+          const maxTokens = Math.max(...models.map((row) => Number(suite.avg_tokens?.[row.id] || 0)), 1);
+          return `<div class="webui-suite-row" data-model="${escapeHtml(model.id)}">
+            <span>${escapeHtml(model.label)}</span>
+            <div class="mini-track"><i style="width:${Math.max(3, (tokens / maxTokens) * 100).toFixed(2)}%"></i></div>
+            <b>${formatNumber(tokens)}</b>
+            <small>$${formatMoney(suite.cost_usd?.[model.id] || 0)}</small>
+          </div>`;
+        })
+        .join("");
+      return `<article class="webui-suite-card">
+        <div class="game-card-head">
+          <div><h2>${escapeHtml(suite.name)}</h2><p>${escapeHtml(suite.focus || "")}</p></div>
+          <span>${formatNumber(suite.tasks || 0)} tasks</span>
+        </div>
+        ${rows}
+      </article>`;
+    })
+    .join("");
+}
+
+function webUiFrameCount(playback) {
+  return Math.max(
+    ...Object.values(playback?.models || {}).map((model) => (Array.isArray(model.frames) ? model.frames.length : 0)),
+    0
+  );
+}
+
 function bestBy(rows, key) {
   return [...rows].sort((a, b) => Number(b[key] || 0) - Number(a[key] || 0))[0];
 }
@@ -660,5 +957,26 @@ function escapeHtml(value) {
 
 initializeTabs();
 runButton.addEventListener("click", startRun);
+if (webuiPlay) {
+  webuiPlay.addEventListener("click", () => {
+    webuiPlaying = !webuiPlaying;
+    const playback = (webuiReport?.playbacks || []).find((item) => item.id === activeWebuiPlaybackId);
+    const models = webuiReport?.models || [];
+    if (playback) {
+      renderWebUiPlayback(playback, models);
+      startWebUiTimer(playback, models);
+    }
+  });
+}
+if (webuiScrubber) {
+  webuiScrubber.addEventListener("input", () => {
+    webuiPlaying = false;
+    if (webuiTimer) window.clearInterval(webuiTimer);
+    activeWebuiStep = Number(webuiScrubber.value || 0);
+    const playback = (webuiReport?.playbacks || []).find((item) => item.id === activeWebuiPlaybackId);
+    if (playback) renderWebUiPlayback(playback, webuiReport?.models || []);
+  });
+}
 loadConfig();
 loadGameWorld();
+loadWebUiBenchmarks();

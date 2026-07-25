@@ -20,6 +20,8 @@ from slm_agent_router.web_benchmark import (
     validate_action,
 )
 from slm_agent_router.gameworld import gameworld_report, normalize_report
+from slm_agent_router.webui_benchmarks import normalize_report as normalize_webui_report
+from slm_agent_router.webui_benchmarks import webui_benchmark_report
 import asyncio
 import time
 
@@ -296,6 +298,48 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report["models"]), 2)
         self.assertEqual(report["games"][0]["scores"]["cascade"], 1.0)
         self.assertEqual(report["playbacks"][0]["id"], "2048")
+
+    def test_webui_report_has_supported_suites_and_playbacks(self):
+        report = webui_benchmark_report()
+        suite_ids = {suite["id"] for suite in report["suites"]}
+        self.assertEqual({"miniwob", "webarena", "visualwebarena", "workarena"}, suite_ids)
+        model_ids = {model["id"] for model in report["models"]}
+        self.assertEqual({"cascade", "openai", "claude"}, model_ids)
+        self.assertGreaterEqual(len(report["playbacks"]), 4)
+
+    def test_webui_normalizes_run_logs(self):
+        report = normalize_webui_report(
+            {
+                "playbacks": [{"id": "miniwob-contact-form", "suite": "miniwob"}],
+                "runs": [
+                    {
+                        "model": "cascade",
+                        "suite": "miniwob",
+                        "suite_name": "MiniWoB++",
+                        "passed": True,
+                        "elapsed_s": 5,
+                        "total_tokens": 600,
+                        "estimated_cost_usd": 0.004,
+                        "steps": 4,
+                        "slm_actions": 4,
+                    },
+                    {
+                        "model": "openai",
+                        "suite": "miniwob",
+                        "suite_name": "MiniWoB++",
+                        "passed": False,
+                        "elapsed_s": 9,
+                        "total_tokens": 1500,
+                        "estimated_cost_usd": 0.02,
+                        "steps": 5,
+                    },
+                ],
+            },
+            source="inline",
+        )
+        self.assertEqual(report["mode"], "imported")
+        self.assertEqual(report["suites"][0]["success"]["cascade"], 1.0)
+        self.assertEqual(report["playbacks"][0]["suite"], "miniwob")
 
 
 if __name__ == "__main__":

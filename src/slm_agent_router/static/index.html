@@ -14,7 +14,7 @@
           <div>
             <p class="eyebrow">Agent benchmark arena</p>
             <h1>SLM Cascade Lab</h1>
-            <p class="subtitle">Side-by-side agent runs with live browsers, route telemetry, and GameWorld cost visuals.</p>
+            <p class="subtitle">Side-by-side agent runs with live browsers, route telemetry, game tasks, and web UI benchmark traces.</p>
           </div>
         </div>
         <div class="run-total" id="run-total">Idle</div>
@@ -23,6 +23,7 @@
       <nav class="mode-tabs" aria-label="Benchmark mode">
         <button class="mode-tab active" type="button" data-view="browser-view">Browser race</button>
         <button class="mode-tab" type="button" data-view="gameworld-view">GameWorld benchmark</button>
+        <button class="mode-tab" type="button" data-view="webui-view">Web UI benchmarks</button>
       </nav>
 
       <section id="browser-view" class="view active">
@@ -124,6 +125,66 @@
           </div>
           <div class="trace-lanes" id="trace-lanes"></div>
         </section>
+      </section>
+
+      <section id="webui-view" class="view">
+        <section class="webui-hero" aria-label="Web UI benchmark overview">
+          <div>
+            <p class="eyebrow">Web UI benchmarks</p>
+            <h2>Watch agents complete browser tasks from established benchmark suites</h2>
+            <p class="gameworld-copy">Select MiniWoB++, WebArena, VisualWebArena, or WorkArena to inspect the task trace, compare route decisions, and see token cost per model.</p>
+          </div>
+          <div class="report-source" id="webui-source">Loading report</div>
+        </section>
+
+        <section class="webui-lab" aria-label="Web UI benchmark task explorer">
+          <div class="webui-head">
+            <div>
+              <p class="eyebrow">Task explorer</p>
+              <h2>Select a benchmark suite</h2>
+            </div>
+            <div class="webui-suite-tabs" id="webui-suite-tabs" role="tablist" aria-label="Web UI benchmark suite"></div>
+          </div>
+          <section class="scorecards" id="webui-cards" aria-label="Web UI benchmark summary cards"></section>
+          <div class="webui-workbench">
+            <aside class="webui-task-list" id="webui-task-list" aria-label="Benchmark tasks"></aside>
+            <section class="webui-replay" aria-label="Selected benchmark replay">
+              <div class="webui-replay-head">
+                <div id="webui-task-title"></div>
+                <div class="webui-controls">
+                  <button id="webui-play" type="button">Pause</button>
+                  <label>
+                    <span>Step</span>
+                    <input id="webui-scrubber" type="range" min="0" max="0" value="0">
+                  </label>
+                  <output id="webui-scrubber-value">1 / 1</output>
+                </div>
+              </div>
+              <div class="webui-stage" id="webui-stage"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="chart-grid" aria-label="Web UI benchmark charts">
+          <article class="chart-panel">
+            <h2>Success Rate</h2>
+            <div class="bar-chart" id="webui-success-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Median Time</h2>
+            <div class="bar-chart inverse" id="webui-time-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Avg Tokens</h2>
+            <div class="bar-chart inverse" id="webui-token-chart"></div>
+          </article>
+          <article class="chart-panel">
+            <h2>Cost Per Success</h2>
+            <div class="bar-chart inverse" id="webui-cost-success-chart"></div>
+          </article>
+        </section>
+
+        <section class="webui-suite-grid" id="webui-suite-grid" aria-label="Per-suite token cost comparison"></section>
       </section>
     </main>
     <template id="agent-template">
