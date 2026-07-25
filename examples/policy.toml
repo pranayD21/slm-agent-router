@@ -1,0 +1,8 @@
+local_model = "mock-local"
+fallback_model = "mock-cloud"
+max_local_retries = 1
+confidence_threshold = 0.6
+schema_strictness = "json"
+enable_schema_validation = true
+enable_tool_arg_validation = true
+enable_confidence = true

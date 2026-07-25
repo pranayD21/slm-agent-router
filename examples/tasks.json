@@ -1,0 +1,43 @@
+[
+  {
+    "task_id": "local_ok",
+    "tool": "lookup_order",
+    "args": {
+      "order_id": "A100"
+    },
+    "case": "valid"
+  },
+  {
+    "task_id": "repair_json",
+    "tool": "lookup_order",
+    "args": {
+      "order_id": "A101"
+    },
+    "case": "invalid_json"
+  },
+  {
+    "task_id": "confidence_escalates",
+    "tool": "calculate_total",
+    "args": {
+      "amount": 10,
+      "tax": 1
+    },
+    "case": "low_confidence"
+  },
+  {
+    "task_id": "wrong_tool_escalates",
+    "tool": "format_reply",
+    "args": {
+      "tone": "brief"
+    },
+    "case": "wrong_tool"
+  },
+  {
+    "task_id": "missing_arg_escalates",
+    "tool": "lookup_order",
+    "args": {
+      "order_id": "A102"
+    },
+    "case": "missing_arg"
+  }
+]
