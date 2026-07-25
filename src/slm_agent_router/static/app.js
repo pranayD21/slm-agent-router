@@ -7,6 +7,7 @@ const resetButton = document.querySelector("#reset-view");
 const promptInput = document.querySelector("#inbox-prompt");
 const promptChips = document.querySelector("#prompt-chips");
 const runButton = document.querySelector("#run-inbox");
+const composeButton = document.querySelector(".compose-button");
 const composerStatus = document.querySelector("#composer-status");
 const resultsNode = document.querySelector("#agent-results");
 const summaryNode = document.querySelector("#run-summary");
@@ -29,6 +30,9 @@ const state = {
   search: "",
   selectedEmailId: "",
   runs: [],
+  archivedIds: new Set(),
+  starredIds: new Set(),
+  readState: new Map(),
 };
 
 async function loadInbox() {
@@ -54,12 +58,13 @@ function renderInbox() {
 
 function renderMetrics() {
   if (!metricsNode) return;
+  const active = state.emails.filter((email) => !isArchived(email));
   metricsNode.innerHTML = [
-    metricTile("Total", state.stats.total || 0),
-    metricTile("Unread", state.stats.unread || 0),
-    metricTile("Needs Reply", state.stats.needs_response || 0),
-    metricTile("Critical", state.stats.critical || 0),
-    metricTile("Due Today", state.stats.today || 0),
+    metricTile("Inbox", active.length),
+    metricTile("Unread", active.filter(isUnread).length),
+    metricTile("Starred", state.starredIds.size),
+    metricTile("Archived", state.archivedIds.size),
+    metricTile("Due Today", active.filter((email) => String(email.deadline || "").includes("Today")).length),
   ].join("");
 }
 
@@ -71,9 +76,11 @@ function renderFilters() {
   if (!filterNode) return;
   const filters = [
     ["all", "All"],
+    ["starred", "Starred"],
     ["needs-response", "Needs reply"],
     ["critical", "Critical"],
     ["today", "Due today"],
+    ["archived", "Archived"],
     ["customer", "Customer"],
     ["finance", "Finance"],
     ["legal", "Legal"],
@@ -97,9 +104,15 @@ function renderEmailList() {
   }
   listNode.innerHTML = emails
     .map((email) => {
-      return `<button class="mail-item${email.id === state.selectedEmailId ? " active" : ""}" type="button" data-email="${escapeHtml(email.id)}">
+      const classes = [
+        "mail-item",
+        email.id === state.selectedEmailId ? "active" : "",
+        isUnread(email) ? "unread" : "",
+        isStarred(email) ? "starred" : "",
+      ].filter(Boolean).join(" ");
+      return `<button class="${classes}" type="button" data-email="${escapeHtml(email.id)}">
         <div class="mail-item-top">
-          <b>${escapeHtml(email.from_name)}</b>
+          <b>${isStarred(email) ? "* " : ""}${escapeHtml(email.from_name)}</b>
           <span>${escapeHtml(shortTime(email.received))}</span>
         </div>
         <strong>${escapeHtml(email.subject)}</strong>
@@ -135,6 +148,12 @@ function renderEmailDetail() {
     </div>
     <div class="email-priority ${priorityClass(email)}">${escapeHtml(email.urgency)} · ${formatNumber(email.priority)}</div>
   </div>
+  <div class="email-actions">
+    <button type="button" data-mail-action="archive" data-email-id="${escapeHtml(email.id)}">${isArchived(email) ? "Move to inbox" : "Archive"}</button>
+    <button type="button" data-mail-action="read" data-email-id="${escapeHtml(email.id)}">${isUnread(email) ? "Mark read" : "Mark unread"}</button>
+    <button type="button" data-mail-action="star" data-email-id="${escapeHtml(email.id)}">${isStarred(email) ? "Unstar" : "Star"}</button>
+    <button type="button" data-mail-action="reply" data-email-id="${escapeHtml(email.id)}">Reply with agents</button>
+  </div>
   <p class="email-body">${escapeHtml(email.body)}</p>
   <div class="email-meta-grid">
     <span><b>Deadline</b>${escapeHtml(email.deadline || "None")}</span>
@@ -159,10 +178,10 @@ function renderPromptChips() {
 
 function renderInitialResults() {
   if (summaryNode) {
-    summaryNode.innerHTML = `<span class="pill"><strong>Ready</strong> Send a prompt to compare the three agents.</span>`;
+    summaryNode.innerHTML = `<span class="pill"><strong>Ready</strong> Ask the agents to search, summarize, draft, or triage this inbox.</span>`;
   }
   if (resultsNode) {
-    resultsNode.innerHTML = ["cascade", "openai", "claude"].map((id) => loadingCard(id, "Idle")).join("");
+    resultsNode.innerHTML = `<div class="chat-empty">Ask something like "what did Nora say" or "draft replies to the 3 highest priority customer emails."</div>`;
   }
   renderHistory();
 }
@@ -178,7 +197,7 @@ async function runInboxAgents() {
   composerStatus.textContent = "Agents reading inbox";
   total.textContent = "Running";
   summaryNode.innerHTML = `<span class="pill"><strong>Running</strong> ${escapeHtml(prompt)}</span>`;
-  resultsNode.innerHTML = ["cascade", "openai", "claude"].map((id) => loadingCard(id, "Running")).join("");
+  resultsNode.innerHTML = userPromptBubble(prompt) + ["cascade", "openai", "claude"].map((id) => loadingCard(id, "Working")).join("");
   const startedAt = performance.now();
   try {
     const response = await fetch("/api/inbox/runs", {
@@ -206,47 +225,51 @@ async function runInboxAgents() {
 
 function renderRun(run) {
   composerStatus.textContent = "Complete";
-  total.textContent = `${(run.elapsed_ms / 1000).toFixed(2)}s`;
+  total.textContent = `${formatDuration(run.elapsed_ms)} run`;
   const results = run.results || [];
-  const fastest = results.find((result) => result.agent_id === run.winner?.fastest);
-  const cheapest = results.find((result) => result.agent_id === run.winner?.lowest_cost);
-  const best = results.find((result) => result.agent_id === run.winner?.highest_effectiveness);
+  const summary = run.summary || {};
   summaryNode.innerHTML = [
-    summaryPill("Fastest", fastest),
-    summaryPill("Lowest cost", cheapest),
-    summaryPill("Highest effectiveness", best, "effectiveness"),
-    `<span class="pill"><strong>Evaluator target</strong> ${(run.truth || []).length} key emails</span>`,
+    summaryPill("State", summary.state || "complete"),
+    summaryPill("Matched", `${summary.matched_emails || 0} emails`),
+    summaryPill("Tokens", formatNumber(summary.total_tokens || 0)),
+    summaryPill("Cost", `$${formatMoney(summary.total_cost_usd || 0)}`),
+    summary.providers_unavailable ? summaryPill("Offline", `${summary.providers_unavailable} provider${summary.providers_unavailable === 1 ? "" : "s"}`) : "",
   ].join("");
-  resultsNode.innerHTML = results.map((result) => resultCard(result)).join("");
+  resultsNode.innerHTML = userPromptBubble(run.prompt) + results.map((result) => resultCard(result)).join("");
   renderHistory();
 }
 
-function summaryPill(label, result, mode = "time") {
-  if (!result) return "";
-  const value = mode === "effectiveness" ? `${result.effectiveness}%` : `${(result.runtime_ms / 1000).toFixed(2)}s`;
-  return `<span class="pill"><strong>${escapeHtml(label)}</strong> ${escapeHtml(result.label)} · ${escapeHtml(value)}</span>`;
+function summaryPill(label, value) {
+  return `<span class="pill"><strong>${escapeHtml(label)}</strong> ${escapeHtml(value)}</span>`;
 }
 
 function resultCard(result) {
+  const completion = result.completion || { checks: [], state: result.status || "complete" };
+  const work = result.work || {};
   return `<article class="inbox-agent-card" data-model="${escapeHtml(result.agent_id)}">
     <div class="agent-card-head">
       <div>
         <h2>${escapeHtml(result.label)}</h2>
-        <p>${escapeHtml(result.model)}</p>
+        <p>${escapeHtml(result.provider || result.agent_id)} · ${escapeHtml(result.model)}</p>
       </div>
-      <span>${formatNumber(result.effectiveness)}%</span>
+      <span class="status-chip ${escapeHtml(completion.state)}">${escapeHtml(statusLabel(completion.state))}</span>
     </div>
     <div class="result-metrics">
-      <span><b>${(result.runtime_ms / 1000).toFixed(2)}s</b> Runtime</span>
-      <span><b>${formatNumber(result.tokens)}</b> Tokens</span>
-      <span><b>$${formatMoney(result.cost_usd)}</b> Cost</span>
+      <span><b>${escapeHtml(formatDuration(result.runtime_ms))}</b> Measured</span>
+      <span><b>${formatNumber(result.tokens || 0)}</b> Tokens</span>
+      <span><b>$${formatMoney(result.cost_usd || 0)}</b> Cost</span>
+      <span><b>${formatNumber(work.messages_matched || 0)}</b> Emails</span>
+      <span><b>${formatNumber(work.drafts_created || 0)}</b> Drafts</span>
     </div>
-    <div class="effectiveness-meter" aria-label="Effectiveness"><i style="width:${Math.max(3, result.effectiveness).toFixed(1)}%"></i></div>
-    <pre class="agent-answer">${escapeHtml(result.answer)}</pre>
+    <div class="completion-checks">
+      ${completion.checks.map((check) => `<span class="${check.passed ? "passed" : "failed"}">${check.passed ? "OK" : "Review"} ${escapeHtml(check.label)}</span>`).join("")}
+    </div>
+    <div class="agent-answer">${formatAnswer(result.answer)}</div>
     <div class="selected-mail">
-      <h3>Emails selected</h3>
+      <h3>Mail used</h3>
       ${result.selected_emails.map(selectedEmailRow).join("")}
     </div>
+    ${renderOperations(result.operations)}
     ${renderDrafts(result.drafts)}
     <ol class="agent-trace">
       ${result.actions.map((action) => `<li><span class="route-chip ${escapeHtml(action.route)}">${escapeHtml(action.label)}</span><small>${escapeHtml(action.detail)}</small></li>`).join("")}
@@ -258,7 +281,19 @@ function selectedEmailRow(email) {
   return `<button type="button" class="selected-email-row" data-select-email="${escapeHtml(email.id)}">
     <b>${escapeHtml(email.from_name)}</b>
     <span>${escapeHtml(email.subject)}</span>
+    <small>${escapeHtml(shorten(email.body || "", 120))}</small>
   </button>`;
+}
+
+function renderOperations(operations) {
+  if (!operations || !operations.length) return "";
+  return `<div class="agent-operations">
+    <h3>Actions</h3>
+    ${operations.map((operation) => `<button type="button" data-select-email="${escapeHtml(operation.email_id)}">
+      <b>${escapeHtml(operation.label)}</b>
+      <span>${escapeHtml(operation.reason)}</span>
+    </button>`).join("")}
+  </div>`;
 }
 
 function renderDrafts(drafts) {
@@ -302,10 +337,10 @@ function renderHistory() {
   }
   historyNode.innerHTML = state.runs
     .map((run) => {
-      const best = run.results.find((result) => result.agent_id === run.winner?.highest_effectiveness);
+      const summary = run.summary || {};
       return `<button class="history-item" type="button" data-history="${escapeHtml(run.prompt)}">
         <span>${escapeHtml(shorten(run.prompt, 92))}</span>
-        <b>${escapeHtml(best?.label || "n/a")} · ${formatNumber(best?.effectiveness || 0)}%</b>
+        <b>${escapeHtml(statusLabel(summary.state || "complete"))} · ${formatNumber(summary.matched_emails || 0)} emails</b>
       </button>`;
     })
     .join("");
@@ -319,13 +354,77 @@ function filteredEmails() {
   return state.emails.filter((email) => {
     const matchesFilter =
       state.filter === "all" ||
+      (state.filter === "starred" && isStarred(email)) ||
+      (state.filter === "archived" && isArchived(email)) ||
       (state.filter === "needs-response" && email.needs_response) ||
       (state.filter === "critical" && email.urgency === "critical") ||
       (state.filter === "today" && String(email.deadline || "").includes("Today")) ||
       email.category.toLowerCase() === state.filter;
+    const matchesArchiveState = state.filter === "archived" ? isArchived(email) : !isArchived(email);
     const haystack = `${email.from_name} ${email.from_email} ${email.subject} ${email.body} ${email.category} ${email.tags.join(" ")}`.toLowerCase();
-    return matchesFilter && (!query || haystack.includes(query));
+    return matchesFilter && matchesArchiveState && (!query || haystack.includes(query));
   });
+}
+
+function userPromptBubble(prompt) {
+  return `<article class="chat-prompt"><p>${escapeHtml(prompt)}</p></article>`;
+}
+
+function statusLabel(value) {
+  return String(value || "complete").replaceAll("_", " ");
+}
+
+function formatAnswer(value) {
+  return String(value || "")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join("");
+}
+
+function formatDuration(value) {
+  const ms = Number(value || 0);
+  if (ms < 1) return `${ms.toFixed(2)}ms`;
+  if (ms < 1000) return `${ms.toFixed(ms < 10 ? 1 : 0)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function isArchived(email) {
+  return state.archivedIds.has(email.id);
+}
+
+function isStarred(email) {
+  return state.starredIds.has(email.id);
+}
+
+function isUnread(email) {
+  if (state.readState.has(email.id)) return state.readState.get(email.id);
+  return Boolean(email.unread);
+}
+
+function handleMailAction(action, emailId) {
+  const email = state.emails.find((item) => item.id === emailId);
+  if (!email) return;
+  if (action === "archive") {
+    if (isArchived(email)) state.archivedIds.delete(email.id);
+    else state.archivedIds.add(email.id);
+    const emails = filteredEmails();
+    if (!emails.some((item) => item.id === state.selectedEmailId)) {
+      state.selectedEmailId = emails[0]?.id || state.emails.find((item) => !isArchived(item))?.id || email.id;
+    }
+  }
+  if (action === "read") {
+    state.readState.set(email.id, !isUnread(email));
+  }
+  if (action === "star") {
+    if (isStarred(email)) state.starredIds.delete(email.id);
+    else state.starredIds.add(email.id);
+  }
+  if (action === "reply") {
+    promptInput.value = `Draft a reply to ${email.from_name} about "${email.subject}"`;
+    promptInput.focus();
+  }
+  renderInbox();
 }
 
 function priorityClass(email) {
@@ -376,6 +475,11 @@ resetButton.addEventListener("click", () => {
 });
 
 runButton.addEventListener("click", runInboxAgents);
+composeButton.addEventListener("click", () => {
+  const email = state.emails.find((item) => item.id === state.selectedEmailId);
+  promptInput.value = email ? `Draft a reply to ${email.from_name} about "${email.subject}"` : "Draft a new email";
+  promptInput.focus();
+});
 promptInput.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     runInboxAgents();
@@ -383,6 +487,11 @@ promptInput.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  const actionButton = event.target.closest("[data-mail-action]");
+  if (actionButton) {
+    handleMailAction(actionButton.dataset.mailAction, actionButton.dataset.emailId);
+    return;
+  }
   const button = event.target.closest("[data-select-email]");
   if (!button) return;
   state.selectedEmailId = button.dataset.selectEmail;

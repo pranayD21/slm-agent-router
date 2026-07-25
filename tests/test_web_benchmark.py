@@ -20,7 +20,7 @@ from slm_agent_router.web_benchmark import (
     validate_action,
 )
 from slm_agent_router.gameworld import gameworld_report, normalize_report
-from slm_agent_router.inbox_benchmark import inbox_snapshot, run_inbox_comparison
+from slm_agent_router.inbox_benchmark import deterministic_inbox_providers, inbox_snapshot, run_inbox_comparison
 from slm_agent_router.webui_benchmarks import normalize_report as normalize_webui_report
 from slm_agent_router.webui_benchmarks import webui_benchmark_report
 import asyncio
@@ -350,27 +350,38 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(snapshot["suggested_prompts"]), 4)
 
     async def test_inbox_run_compares_three_agents(self):
-        run = await run_inbox_comparison("Summarize the most important emails I need to respond to today.")
+        run = await run_inbox_comparison(
+            "Summarize the most important emails I need to respond to today.",
+            providers=deterministic_inbox_providers(),
+        )
         self.assertEqual({"cascade", "openai", "claude"}, {result["agent_id"] for result in run["results"]})
-        self.assertIn("highest_effectiveness", run["winner"])
+        self.assertNotIn("winner", run)
+        self.assertIn("summary", run)
         for result in run["results"]:
-            self.assertGreater(result["runtime_ms"], 0)
-            self.assertGreater(result["tokens"], 0)
-            self.assertGreaterEqual(result["effectiveness"], 1)
+            self.assertNotIn("effectiveness", result)
+            self.assertIn("tokens", result)
+            self.assertIn("cost_usd", result)
+            self.assertGreaterEqual(result["runtime_ms"], 0)
+            self.assertIn(result["status"], {"complete", "needs_review"})
+            self.assertGreaterEqual(result["work"]["messages_scanned"], 30)
             self.assertGreaterEqual(len(result["selected_emails"]), 1)
 
     async def test_inbox_direct_sender_prompt_returns_matching_summary(self):
-        run = await run_inbox_comparison("what did nora say")
-        self.assertEqual(["E-1005"], [email["id"] for email in run["truth"]])
+        run = await run_inbox_comparison("what did nora say", providers=deterministic_inbox_providers())
+        self.assertEqual(["E-1005"], [email["id"] for email in run["matched_emails"]])
         for result in run["results"]:
             self.assertEqual(["E-1005"], [email["id"] for email in result["selected_emails"]])
+            self.assertEqual("complete", result["status"])
             answer = result["answer"].lower()
             self.assertIn("summit bank", answer)
             self.assertIn("liability", answer)
             self.assertIn("uncapped", answer)
 
     async def test_inbox_reply_prompt_creates_drafts(self):
-        run = await run_inbox_comparison("Draft replies to the 3 highest priority customer emails.")
+        run = await run_inbox_comparison(
+            "Draft replies to the 3 highest priority customer emails.",
+            providers=deterministic_inbox_providers(),
+        )
         for result in run["results"]:
             self.assertGreaterEqual(len(result["drafts"]), 1)
             self.assertLessEqual(len(result["drafts"]), 3)

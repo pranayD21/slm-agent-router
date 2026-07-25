@@ -33,11 +33,35 @@ Open `http://127.0.0.1:8000`, enter a web-navigation prompt, choose agents, and 
 
 ```bash
 # Optional local model stage for the cascade.
-export OLLAMA_MODEL="llama3.1"
+export OLLAMA_MODEL="llama3.2:1b"
 export OLLAMA_BASE_URL="http://127.0.0.1:11434"
 ```
 
 The OpenAI and Claude comparison agents use the same browser tool surface as the cascade agent, so the timing comparison measures the end-to-end browser task loop: model decision latency plus browser action latency.
+
+## Inbox agent comparison
+
+The inbox manager uses real model calls when the app runs:
+
+- SLM Cascade calls Ollama at `OLLAMA_BASE_URL` with `OLLAMA_MODEL` (default `llama3.2:1b`).
+- OpenAI Agent calls the OpenAI Responses API with `OPENAI_API_KEY` and `OPENAI_MODEL` (default `gpt-5.6-sol`).
+- Claude Agent calls the Anthropic Messages API with `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` (default `claude-sonnet-5`).
+
+For a fully live local run:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull llama3.2:1b
+
+export OPENAI_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
+export OLLAMA_MODEL="llama3.2:1b"
+
+slm-router serve --host 127.0.0.1 --port 8000
+```
+
+If a provider is missing or offline, its card is marked unavailable instead of showing simulated output.
 
 ## GameWorld benchmark dashboard
 

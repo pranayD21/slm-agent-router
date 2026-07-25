@@ -167,8 +167,19 @@ def create_app():
 
     @app.post("/api/inbox/runs")
     async def start_inbox_run(payload: dict[str, Any]):
+        provider_keys = {
+            "openai": str((payload.get("provider_keys") or {}).get("openai") or "").strip(),
+            "claude": str((payload.get("provider_keys") or {}).get("claude") or "").strip(),
+        }
+        provider_keys = {key: value for key, value in provider_keys.items() if value}
         try:
-            return JSONResponse(await run_inbox_comparison(str(payload.get("prompt", ""))))
+            return JSONResponse(
+                await run_inbox_comparison(
+                    str(payload.get("prompt", "")),
+                    provider_keys=provider_keys,
+                    allow_server_keys=manager.allow_server_keys,
+                )
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

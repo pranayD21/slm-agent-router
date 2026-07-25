@@ -1,43 +1,107 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 
 AGENTS: dict[str, dict[str, Any]] = {
     "cascade": {
         "label": "SLM Cascade",
-        "model": "local cascade + fallback",
-        "speed_ms": 320,
-        "token_scale": 0.48,
-        "cost_per_1k": 0.0012,
-        "draft_quality": 0.83,
-        "coverage_bias": -1,
-        "route": ["SLM triage", "SLM rank", "LLM fallback for wording", "SLM draft check"],
+        "model": os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
+        "route": ["Local retrieval", "Ollama SLM call", "Validate answer", "Prepare actions"],
     },
     "openai": {
         "label": "OpenAI Agent",
-        "model": "frontier agent",
-        "speed_ms": 850,
-        "token_scale": 1.08,
-        "cost_per_1k": 0.010,
-        "draft_quality": 0.93,
-        "coverage_bias": 1,
-        "route": ["LLM read", "LLM rank", "LLM synthesize", "LLM draft"],
+        "model": os.getenv("OPENAI_MODEL", "gpt-5.6-sol"),
+        "route": ["Send inbox to OpenAI", "Receive structured answer", "Validate answer", "Prepare actions"],
     },
     "claude": {
         "label": "Claude Agent",
-        "model": "frontier agent",
-        "speed_ms": 940,
-        "token_scale": 1.16,
-        "cost_per_1k": 0.012,
-        "draft_quality": 0.95,
-        "coverage_bias": 1,
-        "route": ["LLM read", "LLM reason", "LLM prioritize", "LLM draft"],
+        "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+        "route": ["Send inbox to Claude", "Receive structured answer", "Validate answer", "Prepare actions"],
     },
 }
+
+
+INBOX_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "selected_email_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Email ids from the supplied mailbox that directly support the answer.",
+        },
+        "answer": {
+            "type": "string",
+            "description": "A concise but complete visible answer to the user's prompt, grounded only in the supplied emails.",
+        },
+        "drafts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+        "operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["summarize", "draft_reply", "archive", "mark_read", "star", "flag"],
+                    },
+                    "email_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["type", "email_id", "label", "reason"],
+            },
+        },
+    },
+    "required": ["selected_email_ids", "answer", "drafts", "operations"],
+}
+
+
+INBOX_SYSTEM_PROMPT = """You are an inbox-management benchmark agent.
+You receive a synthetic email inbox and a user request. Do the task exactly.
+
+Rules:
+- Return only JSON matching the inbox_result schema.
+- Use only the emails supplied in the prompt. Do not invent senders, facts, deadlines, or actions.
+- selected_email_ids must contain every email that materially supports the answer.
+- If the user asks what a person said, answer from that sender's actual message body.
+- If the user asks for drafts, create realistic draft replies in drafts.
+- If the user asks to archive, include archive operations for safe candidates.
+- The answer field must be the user-visible output, not a note that an agent ran.
+- Be concise, but include enough content for a person to act on the email."""
+
+
+@dataclass
+class InboxProviderOutput:
+    provider: str
+    model: str
+    selected_email_ids: list[str]
+    answer: str
+    drafts: list[dict[str, str]]
+    operations: list[dict[str, Any]]
+    raw: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    error: str | None = None
 
 
 SYNTHETIC_INBOX: list[dict[str, Any]] = [
@@ -573,52 +637,326 @@ def inbox_snapshot() -> dict[str, Any]:
     return {"emails": SYNTHETIC_INBOX, "stats": stats, "categories": categories, "suggested_prompts": prompts}
 
 
-async def run_inbox_comparison(prompt: str) -> dict[str, Any]:
+async def run_inbox_comparison(
+    prompt: str,
+    providers: dict[str, "InboxProvider"] | None = None,
+    provider_keys: dict[str, str] | None = None,
+    allow_server_keys: bool = True,
+) -> dict[str, Any]:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
         raise ValueError("Prompt is required.")
     intent = analyze_prompt(clean_prompt)
-    truth = select_emails(clean_prompt, intent, agent_id="evaluator")
+    matched = select_emails(clean_prompt, intent, agent_id="evaluator")
+    active_providers = providers or build_inbox_providers(provider_keys, allow_server_keys=allow_server_keys)
     started = time.perf_counter()
-    results = await asyncio.gather(*(run_agent(agent_id, clean_prompt, intent, truth) for agent_id in AGENTS))
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    results = await asyncio.gather(
+        *(run_agent(agent_id, clean_prompt, intent, matched, active_providers.get(agent_id)) for agent_id in AGENTS)
+    )
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     return {
         "prompt": clean_prompt,
         "intent": intent,
-        "truth": [email_summary(email) for email in truth],
+        "matched_emails": [email_summary(email) for email in matched],
         "results": results,
         "elapsed_ms": elapsed_ms,
-        "winner": {
-            "fastest": min(results, key=lambda row: row["runtime_ms"])["agent_id"],
-            "lowest_cost": min(results, key=lambda row: row["cost_usd"])["agent_id"],
-            "highest_effectiveness": max(results, key=lambda row: row["effectiveness"])["agent_id"],
-        },
+        "summary": run_summary(results, matched),
     }
 
 
-async def run_agent(agent_id: str, prompt: str, intent: dict[str, Any], truth: list[dict[str, Any]]) -> dict[str, Any]:
+async def run_agent(
+    agent_id: str,
+    prompt: str,
+    intent: dict[str, Any],
+    matched: list[dict[str, Any]],
+    provider: "InboxProvider | None",
+) -> dict[str, Any]:
     profile = AGENTS[agent_id]
     start = time.perf_counter()
-    selected = select_emails(prompt, intent, agent_id=agent_id)
-    await asyncio.sleep((profile["speed_ms"] + len(selected) * 48) / 1000)
-    answer = compose_answer(agent_id, prompt, intent, selected)
-    drafts = compose_drafts(agent_id, selected, intent)
-    tokens = estimate_tokens(agent_id, prompt, selected, answer, drafts)
-    runtime_ms = int((time.perf_counter() - start) * 1000)
-    effectiveness = evaluate_effectiveness(agent_id, selected, truth, drafts, intent)
+    model_context = inbox_context_for_agent(prompt, intent, agent_id)
+    output = await call_inbox_provider(provider, agent_id, prompt, intent, model_context)
+    selected = selected_from_provider_output(output)
+    if not selected and output.answer:
+        selected = infer_selected_from_answer(output.answer)
+    drafts = sanitize_drafts(output.drafts) if intent["wants_reply"] else []
+    operations = sanitize_operations(output.operations, selected, intent) or mailbox_operations(selected, intent)
+    answer = output.answer.strip()
+    completion = (
+        provider_error_completion(output.error)
+        if output.error
+        else evaluate_completion(selected, matched, drafts, intent, answer)
+    )
+    runtime_ms = round((time.perf_counter() - start) * 1000, 2)
+    input_tokens = output.input_tokens or estimate_text_tokens(build_inbox_prompt(prompt, intent, model_context))
+    output_tokens = output.output_tokens or estimate_text_tokens(answer + " " + " ".join(draft["body"] for draft in drafts))
+    tokens = input_tokens + output_tokens
     return {
         "agent_id": agent_id,
         "label": profile["label"],
-        "model": profile["model"],
+        "provider": output.provider,
+        "model": output.model or profile["model"],
         "runtime_ms": runtime_ms,
-        "tokens": tokens,
-        "cost_usd": round((tokens / 1000) * profile["cost_per_1k"], 4),
-        "effectiveness": effectiveness,
+        "status": completion["state"],
+        "completion": completion,
         "answer": answer,
         "selected_emails": [email_summary(email) for email in selected],
         "drafts": drafts,
-        "actions": action_trace(agent_id, selected, intent),
+        "operations": operations,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tokens": tokens,
+        "cost_usd": round(estimate_provider_cost_usd(agent_id, output.model, input_tokens, output_tokens), 6),
+        "raw_response": output.raw[:1200],
+        "work": {
+            "messages_scanned": len(SYNTHETIC_INBOX),
+            "messages_sent_to_model": len(model_context),
+            "messages_matched": len(selected),
+            "drafts_created": len(drafts),
+            "actions_prepared": len(operations),
+        },
+        "actions": action_trace(agent_id, selected, intent, output),
     }
+
+
+class InboxProvider:
+    provider = "provider"
+    model = "unknown"
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        raise NotImplementedError
+
+
+class OpenAIInboxProvider(InboxProvider):
+    provider = "openai"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout_s: float = 90,
+    ):
+        self.api_key = api_key
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+        self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+        self.timeout_s = timeout_s
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        if not self.api_key:
+            return unavailable_output("openai", self.model, "Set OPENAI_API_KEY to run the OpenAI inbox agent.")
+
+        import httpx
+
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": INBOX_SYSTEM_PROMPT},
+                {"role": "user", "content": build_inbox_prompt(prompt, intent, emails)},
+            ],
+            "max_output_tokens": int(os.getenv("INBOX_OPENAI_MAX_OUTPUT_TOKENS", "1600")),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "inbox_result",
+                    "strict": True,
+                    "schema": INBOX_RESULT_SCHEMA,
+                }
+            },
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.post(f"{self.base_url}/responses", headers=headers, json=payload)
+            if response.status_code >= 400:
+                return unavailable_output("openai", self.model, response_error("OpenAI", response))
+            data = response.json()
+            raw = extract_openai_text(data)
+            parsed = parse_model_json(raw)
+            input_tokens, output_tokens = extract_openai_usage(data)
+            return provider_output_from_payload("openai", self.model, parsed, raw, input_tokens, output_tokens)
+        except Exception as exc:
+            return unavailable_output("openai", self.model, f"OpenAI API call failed: {safe_error(exc)}")
+
+
+class AnthropicInboxProvider(InboxProvider):
+    provider = "claude"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout_s: float = 90,
+    ):
+        self.api_key = api_key
+        self.model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
+        self.base_url = (base_url or os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")).rstrip("/")
+        self.timeout_s = timeout_s
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        if not self.api_key:
+            return unavailable_output("claude", self.model, "Set ANTHROPIC_API_KEY to run the Claude inbox agent.")
+
+        import httpx
+
+        payload = {
+            "model": self.model,
+            "max_tokens": int(os.getenv("INBOX_ANTHROPIC_MAX_TOKENS", "1600")),
+            "system": INBOX_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": build_inbox_prompt(prompt, intent, emails)}],
+            "tools": [
+                {
+                    "name": "inbox_result",
+                    "description": "Return the completed inbox task result.",
+                    "input_schema": INBOX_RESULT_SCHEMA,
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "inbox_result"},
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+            "content-type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.post(f"{self.base_url}/messages", headers=headers, json=payload)
+            if response.status_code >= 400:
+                return unavailable_output("claude", self.model, response_error("Claude", response))
+            data = response.json()
+            parsed, raw = extract_anthropic_inbox_payload(data)
+            input_tokens, output_tokens = extract_anthropic_usage(data)
+            return provider_output_from_payload("claude", self.model, parsed, raw, input_tokens, output_tokens)
+        except Exception as exc:
+            return unavailable_output("claude", self.model, f"Claude API call failed: {safe_error(exc)}")
+
+
+class OllamaInboxProvider(InboxProvider):
+    provider = "ollama"
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout_s: float = 60,
+    ):
+        self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+        self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
+        self.timeout_s = timeout_s
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        import httpx
+
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "format": INBOX_RESULT_SCHEMA,
+            "options": {"temperature": 0},
+            "messages": [
+                {"role": "system", "content": INBOX_SYSTEM_PROMPT},
+                {"role": "user", "content": build_inbox_prompt(prompt, intent, emails)},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            if response.status_code >= 400:
+                return unavailable_output("ollama", self.model, response_error("Ollama", response))
+            data = response.json()
+            raw = data.get("message", {}).get("content", "")
+            parsed = parse_model_json(raw)
+            input_tokens = int(data.get("prompt_eval_count") or 0)
+            output_tokens = int(data.get("eval_count") or 0)
+            return provider_output_from_payload("ollama", self.model, parsed, raw, input_tokens, output_tokens)
+        except Exception as exc:
+            return unavailable_output("ollama", self.model, f"Ollama call failed: {safe_error(exc)}")
+
+
+class DeterministicInboxProvider(InboxProvider):
+    def __init__(self, agent_id: str):
+        self.agent_id = agent_id
+        self.provider = f"test-{agent_id}"
+        self.model = "deterministic-test-provider"
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        del emails
+        selected = select_emails(prompt, intent, agent_id=self.agent_id)
+        answer = compose_answer(self.agent_id, prompt, intent, selected)
+        drafts = compose_drafts(self.agent_id, selected, intent)
+        operations = mailbox_operations(selected, intent)
+        return InboxProviderOutput(
+            provider=self.provider,
+            model=self.model,
+            selected_email_ids=[email["id"] for email in selected],
+            answer=answer,
+            drafts=drafts,
+            operations=operations,
+            raw=json.dumps(
+                {
+                    "selected_email_ids": [email["id"] for email in selected],
+                    "answer": answer,
+                    "drafts": drafts,
+                    "operations": operations,
+                }
+            ),
+            input_tokens=120,
+            output_tokens=80,
+        )
+
+
+def build_inbox_providers(
+    provider_keys: dict[str, str] | None = None,
+    allow_server_keys: bool = True,
+) -> dict[str, InboxProvider]:
+    provider_keys = provider_keys or {}
+    openai_key = provider_keys.get("openai") or (os.getenv("OPENAI_API_KEY") if allow_server_keys else None)
+    claude_key = provider_keys.get("claude") or (os.getenv("ANTHROPIC_API_KEY") if allow_server_keys else None)
+    return {
+        "cascade": OllamaInboxProvider(),
+        "openai": OpenAIInboxProvider(api_key=openai_key),
+        "claude": AnthropicInboxProvider(api_key=claude_key),
+    }
+
+
+def deterministic_inbox_providers() -> dict[str, InboxProvider]:
+    return {agent_id: DeterministicInboxProvider(agent_id) for agent_id in AGENTS}
+
+
+async def call_inbox_provider(
+    provider: InboxProvider | None,
+    agent_id: str,
+    prompt: str,
+    intent: dict[str, Any],
+    emails: list[dict[str, Any]],
+) -> InboxProviderOutput:
+    if provider is None:
+        return unavailable_output(agent_id, AGENTS[agent_id]["model"], f"No provider configured for {agent_id}.")
+    return await provider.complete(prompt, intent, emails)
 
 
 def analyze_prompt(prompt: str) -> dict[str, Any]:
@@ -663,13 +1001,8 @@ def select_emails(prompt: str, intent: dict[str, Any], agent_id: str) -> list[di
     if target_ids and not intent["wants_archive"]:
         scored = [item for item in scored if item[1]["id"] in target_ids]
     scored.sort(key=lambda item: item[0], reverse=True)
-    profile = AGENTS.get(agent_id, {"coverage_bias": 0})
     count = selection_count(intent)
-    if agent_id == "cascade" and not intent["wants_archive"] and not intent.get("targeted_lookup"):
-        count = max(3, count + int(profile["coverage_bias"]))
-    elif agent_id in {"openai", "claude"} and not intent["wants_archive"] and not intent.get("targeted_lookup"):
-        count = min(10, count + int(profile["coverage_bias"]))
-    elif agent_id == "evaluator":
+    if agent_id == "evaluator":
         count = selection_count(intent)
     return [email for score, email in scored if score > 0][:count]
 
@@ -717,27 +1050,360 @@ def archive_score(email: dict[str, Any], prompt: str) -> float:
     return score
 
 
+def inbox_context_for_agent(prompt: str, intent: dict[str, Any], agent_id: str) -> list[dict[str, Any]]:
+    if agent_id == "cascade":
+        candidates = [(score_email(email, prompt, intent), email) for email in SYNTHETIC_INBOX]
+        if intent["wants_archive"]:
+            candidates = [(archive_score(email, prompt), email) for email in SYNTHETIC_INBOX]
+        target_ids = set(intent.get("target_email_ids", []))
+        if target_ids and not intent["wants_archive"]:
+            candidates = [item for item in candidates if item[1]["id"] in target_ids]
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        target_count = max(selection_count(intent), int(os.getenv("INBOX_OLLAMA_CONTEXT_EMAILS", "8")))
+        return [email for score, email in candidates if score > 0][:target_count]
+    return SYNTHETIC_INBOX
+
+
+def build_inbox_prompt(prompt: str, intent: dict[str, Any], emails: list[dict[str, Any]]) -> str:
+    payload = {
+        "user_prompt": prompt,
+        "intent": {
+            "count": intent["count"],
+            "wants_reply": intent["wants_reply"],
+            "wants_archive": intent["wants_archive"],
+            "wants_summary": intent["wants_summary"],
+            "categories": intent["categories"],
+            "direct_lookup": intent["direct_lookup"],
+            "matched_people": intent["matched_people"],
+        },
+        "mailbox": [model_email(email) for email in emails],
+    }
+    return (
+        "Complete the inbox task from this JSON. Return only the JSON result.\n"
+        + json.dumps(payload, ensure_ascii=True)
+    )
+
+
+def model_email(email: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": email["id"],
+        "received": email["received"],
+        "from_name": email["from_name"],
+        "from_email": email["from_email"],
+        "role": email["role"],
+        "subject": email["subject"],
+        "body": email["body"],
+        "category": email["category"],
+        "priority": email["priority"],
+        "urgency": email["urgency"],
+        "deadline": email["deadline"],
+        "needs_response": email["needs_response"],
+        "tags": email["tags"],
+        "expected_action": email["expected_action"],
+    }
+
+
+def provider_output_from_payload(
+    provider: str,
+    model: str,
+    payload: Any,
+    raw: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> InboxProviderOutput:
+    if not isinstance(payload, dict):
+        return unavailable_output(provider, model, "Model returned non-object JSON.", raw=raw)
+    selected_ids = unique_strings(payload.get("selected_email_ids"))
+    return InboxProviderOutput(
+        provider=provider,
+        model=model,
+        selected_email_ids=selected_ids,
+        answer=coerce_answer(payload.get("answer"), selected_ids),
+        drafts=sanitize_drafts(payload.get("drafts") or []),
+        operations=sanitize_operations(payload.get("operations") or [], [], {}),
+        raw=raw,
+        input_tokens=max(0, int(input_tokens or 0)),
+        output_tokens=max(0, int(output_tokens or 0)),
+    )
+
+
+def unavailable_output(provider: str, model: str, message: str, raw: str = "") -> InboxProviderOutput:
+    return InboxProviderOutput(
+        provider=provider,
+        model=model,
+        selected_email_ids=[],
+        answer=message,
+        drafts=[],
+        operations=[],
+        raw=raw or message,
+        error=message,
+    )
+
+
+def coerce_answer(value: Any, selected_ids: list[str]) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return coerce_answer(json.loads(text), selected_ids)
+            except json.JSONDecodeError:
+                selected = selected_from_ids(selected_ids)
+                if selected:
+                    return direct_lookup_answer(selected)
+                return text
+        return text
+    if isinstance(value, list):
+        return "\n".join(coerce_answer(item, selected_ids) for item in value if item).strip()
+    if isinstance(value, dict):
+        for key in ("answer", "summary", "message", "response"):
+            if value.get(key):
+                return coerce_answer(value[key], selected_ids)
+        if value.get("body"):
+            name = value.get("from_name") or value.get("sender") or selected_sender_name(selected_ids)
+            body = str(value["body"]).strip()
+            subject = f" about {value['subject']}" if value.get("subject") else ""
+            return f"{name} said{subject}: {body}".strip()
+        if selected_ids:
+            selected = [email for email in selected_from_ids(selected_ids)]
+            if selected:
+                return direct_lookup_answer(selected)
+        return json.dumps(value, ensure_ascii=True)
+    if selected_ids:
+        selected = [email for email in selected_from_ids(selected_ids)]
+        if selected:
+            return direct_lookup_answer(selected)
+    return ""
+
+
+def selected_sender_name(selected_ids: list[str]) -> str:
+    selected = selected_from_ids(selected_ids)
+    return selected[0]["from_name"] if selected else "The sender"
+
+
+def selected_from_ids(selected_ids: list[str]) -> list[dict[str, Any]]:
+    email_by_id = {email["id"]: email for email in SYNTHETIC_INBOX}
+    return [email_by_id[email_id] for email_id in selected_ids if email_id in email_by_id]
+
+
+def selected_from_provider_output(output: InboxProviderOutput) -> list[dict[str, Any]]:
+    email_by_id = {email["id"]: email for email in SYNTHETIC_INBOX}
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for email_id in output.selected_email_ids:
+        if email_id in seen or email_id not in email_by_id:
+            continue
+        selected.append(email_by_id[email_id])
+        seen.add(email_id)
+    return selected
+
+
+def infer_selected_from_answer(answer: str) -> list[dict[str, Any]]:
+    text = answer.lower()
+    selected = []
+    for email in SYNTHETIC_INBOX:
+        if email["from_name"].lower() in text or email["subject"].lower() in text:
+            selected.append(email)
+    return selected
+
+
+def sanitize_drafts(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    drafts: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        to = str(item.get("to") or "").strip()
+        subject = str(item.get("subject") or "").strip()
+        body = str(item.get("body") or "").strip()
+        if to and subject and body:
+            drafts.append({"to": to, "subject": subject, "body": body})
+    return drafts[:12]
+
+
+def sanitize_operations(value: Any, selected: list[dict[str, Any]], intent: dict[str, Any]) -> list[dict[str, Any]]:
+    del selected, intent
+    if not isinstance(value, list):
+        return []
+    valid_ids = {email["id"] for email in SYNTHETIC_INBOX}
+    valid_types = {"summarize", "draft_reply", "archive", "mark_read", "star", "flag"}
+    operations: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        email_id = str(item.get("email_id") or "").strip()
+        operation_type = str(item.get("type") or "summarize").strip()
+        if email_id not in valid_ids:
+            continue
+        if operation_type not in valid_types:
+            operation_type = "summarize"
+        operations.append(
+            {
+                "type": operation_type,
+                "email_id": email_id,
+                "label": str(item.get("label") or operation_type.replace("_", " ").title()).strip(),
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+    return operations[:12]
+
+
+def parse_model_json(raw: str) -> Any:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def extract_openai_text(data: dict[str, Any]) -> str:
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    chunks: list[str] = []
+    for output in data.get("output") or []:
+        for content in output.get("content") or []:
+            if isinstance(content.get("text"), str):
+                chunks.append(content["text"])
+            elif isinstance(content.get("output_text"), str):
+                chunks.append(content["output_text"])
+    return "\n".join(chunks)
+
+
+def extract_openai_usage(data: dict[str, Any]) -> tuple[int, int]:
+    usage = data.get("usage") or {}
+    return int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0), int(
+        usage.get("output_tokens") or usage.get("completion_tokens") or 0
+    )
+
+
+def extract_anthropic_inbox_payload(data: dict[str, Any]) -> tuple[Any, str]:
+    text_blocks: list[str] = []
+    for block in data.get("content") or []:
+        if block.get("type") == "tool_use" and block.get("name") == "inbox_result":
+            payload = block.get("input") or {}
+            return payload, json.dumps(payload, ensure_ascii=True)
+        if block.get("type") == "text":
+            text_blocks.append(str(block.get("text") or ""))
+    raw = "\n".join(text_blocks)
+    return parse_model_json(raw), raw
+
+
+def extract_anthropic_usage(data: dict[str, Any]) -> tuple[int, int]:
+    usage = data.get("usage") or {}
+    return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+
+
+def unique_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            items.append(text)
+    return items
+
+
+def provider_error_completion(message: str | None) -> dict[str, Any]:
+    return {
+        "state": "provider_unavailable",
+        "passed_checks": 0,
+        "total_checks": 1,
+        "checks": [
+            {
+                "label": "Provider call completed",
+                "passed": False,
+                "detail": message or "Provider did not return a usable response.",
+            }
+        ],
+    }
+
+
+def response_error(provider_name: str, response: Any) -> str:
+    body = str(getattr(response, "text", "") or "").strip().replace("\n", " ")
+    if len(body) > 500:
+        body = body[:497] + "..."
+    return f"{provider_name} API returned HTTP {response.status_code}: {body or response.reason_phrase}"
+
+
+def safe_error(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:500]
+
+
+def estimate_text_tokens(text: str) -> int:
+    return max(1, round(len(str(text or "")) / 4))
+
+
+def estimate_provider_cost_usd(agent_id: str, model: str, input_tokens: int, output_tokens: int) -> float:
+    if agent_id == "cascade":
+        return 0.0
+    input_per_mtok, output_per_mtok = provider_price_per_mtok(agent_id, model)
+    return (input_tokens / 1_000_000) * input_per_mtok + (output_tokens / 1_000_000) * output_per_mtok
+
+
+def provider_price_per_mtok(agent_id: str, model: str) -> tuple[float, float]:
+    normalized = (model or "").lower()
+    if agent_id == "openai":
+        env_input = os.getenv("OPENAI_INPUT_COST_PER_MTOK")
+        env_output = os.getenv("OPENAI_OUTPUT_COST_PER_MTOK")
+        if env_input and env_output:
+            return float(env_input), float(env_output)
+        if "gpt-5.6-luna" in normalized:
+            return 1.0, 6.0
+        if "gpt-5.6-terra" in normalized:
+            return 2.5, 15.0
+        return 5.0, 30.0
+    if agent_id == "claude":
+        env_input = os.getenv("ANTHROPIC_INPUT_COST_PER_MTOK")
+        env_output = os.getenv("ANTHROPIC_OUTPUT_COST_PER_MTOK")
+        if env_input and env_output:
+            return float(env_input), float(env_output)
+        if "haiku" in normalized:
+            return 1.0, 5.0
+        if "sonnet-5" in normalized:
+            return 2.0, 10.0
+        if "sonnet" in normalized:
+            return 3.0, 15.0
+        return 5.0, 25.0
+    return 0.0, 0.0
+
+
 def compose_answer(agent_id: str, prompt: str, intent: dict[str, Any], selected: list[dict[str, Any]]) -> str:
-    lead = {
-        "cascade": "I prioritized the inbox with local triage first, then used fallback wording where a reply needed nuance.",
-        "openai": "I reviewed the inbox broadly and ranked messages by urgency, business impact, and response need.",
-        "claude": "I grouped the inbox by consequence and drafted responses with context, tone, and owner handoff in mind.",
-    }[agent_id]
     if not selected:
-        return f"{lead}\nNo matching emails were found for: {prompt}"
+        return f"No matching emails were found for: {prompt}"
     if intent.get("direct_lookup"):
-        return direct_lookup_answer(lead, selected)
+        return direct_lookup_answer(selected)
     if intent["wants_archive"]:
         bullets = [
             f"{email['from_name']} - {email['subject']}: {message_summary(email)} Low action pressure; {email['expected_action']}"
             for email in selected
         ]
+        return "Safe archive candidates:\n" + "\n".join(f"- {bullet}" for bullet in bullets)
+    heading = "Draft-ready messages:" if intent["wants_reply"] else "Relevant inbox summary:"
+    if agent_id == "cascade":
+        heading = "Fast inbox pass:"
+    elif agent_id == "openai":
+        heading = "Task answer:"
     else:
         bullets = [
             f"{email['from_name']} - {email['subject']}: {message_summary(email)} Action: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
             for email in selected
         ]
-    return lead + "\n" + "\n".join(f"- {bullet}" for bullet in bullets)
+        return "Contextual inbox answer:\n" + "\n".join(f"- {bullet}" for bullet in bullets)
+    bullets = [
+        f"{email['from_name']} - {email['subject']}: {message_summary(email)} Action: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
+        for email in selected
+    ]
+    return heading + "\n" + "\n".join(f"- {bullet}" for bullet in bullets)
 
 
 def compose_drafts(agent_id: str, selected: list[dict[str, Any]], intent: dict[str, Any]) -> list[dict[str, str]]:
@@ -756,76 +1422,189 @@ def compose_drafts(agent_id: str, selected: list[dict[str, Any]], intent: dict[s
     return drafts
 
 
-def action_trace(agent_id: str, selected: list[dict[str, Any]], intent: dict[str, Any]) -> list[dict[str, Any]]:
+def action_trace(
+    agent_id: str,
+    selected: list[dict[str, Any]],
+    intent: dict[str, Any],
+    output: InboxProviderOutput | None = None,
+) -> list[dict[str, Any]]:
     profile = AGENTS[agent_id]
     actions = []
     for index, label in enumerate(profile["route"], start=1):
-        route = "slm" if label.startswith("SLM") else "llm"
+        route = "slm" if agent_id == "cascade" else "llm"
         actions.append(
             {
                 "step": index,
                 "route": route,
                 "label": label,
-                "detail": trace_detail(index, selected, intent),
+                "detail": trace_detail(index, selected, intent, output),
             }
         )
     return actions
 
 
-def trace_detail(index: int, selected: list[dict[str, Any]], intent: dict[str, Any]) -> str:
-    if index == 1:
-        return f"Scanned {len(SYNTHETIC_INBOX)} messages and extracted urgency, sender role, tags, and deadlines."
-    if index == 2:
-        return f"Ranked {len(selected)} selected messages against the user prompt."
-    if index == 3:
-        return "Generated summaries" + (" and draft replies." if intent["wants_reply"] else ".")
-    return "Checked output for missed urgent items and duplicate drafts."
-
-
-def evaluate_effectiveness(
-    agent_id: str,
+def trace_detail(
+    index: int,
     selected: list[dict[str, Any]],
-    truth: list[dict[str, Any]],
+    intent: dict[str, Any],
+    output: InboxProviderOutput | None = None,
+) -> str:
+    if index == 1:
+        if intent.get("matched_people"):
+            return "Matched sender: " + ", ".join(intent["matched_people"]) + "."
+        return f"Read the prompt and searched {len(SYNTHETIC_INBOX)} messages."
+    if index == 2:
+        if output and output.error:
+            return output.error
+        if output:
+            return f"Called {output.provider} model {output.model}."
+        return f"Selected {len(selected)} relevant message{'s' if len(selected) != 1 else ''}."
+    if index == 3:
+        return f"Validated {len(selected)} cited email{'s' if len(selected) != 1 else ''}."
+    return "Prepared mailbox actions for review."
+
+
+def mailbox_operations(selected: list[dict[str, Any]], intent: dict[str, Any]) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    for email in selected:
+        if intent["wants_archive"]:
+            operations.append(
+                {
+                    "type": "archive",
+                    "email_id": email["id"],
+                    "label": f"Archive {email['from_name']}",
+                    "reason": "Low urgency or no response required.",
+                }
+            )
+        elif intent["wants_reply"] and email["needs_response"]:
+            operations.append(
+                {
+                    "type": "draft_reply",
+                    "email_id": email["id"],
+                    "label": f"Draft reply to {email['from_name']}",
+                    "reason": email["expected_action"],
+                }
+            )
+        else:
+            operations.append(
+                {
+                    "type": "summarize",
+                    "email_id": email["id"],
+                    "label": f"Summarize {email['from_name']}",
+                    "reason": email["subject"],
+                }
+            )
+    return operations
+
+
+def evaluate_completion(
+    selected: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
     drafts: list[dict[str, str]],
     intent: dict[str, Any],
-) -> int:
-    selected_ids = {email["id"] for email in selected}
-    truth_ids = {email["id"] for email in truth}
-    if not truth_ids:
-        return 80
-    coverage = len(selected_ids & truth_ids) / len(truth_ids)
-    precision = len(selected_ids & truth_ids) / max(1, len(selected_ids))
-    draft_score = 1.0 if not intent["wants_reply"] else min(1.0, len(drafts) / max(1, min(intent["count"], len([email for email in truth if email["needs_response"]]))))
-    quality = AGENTS.get(agent_id, {}).get("draft_quality", 0.85)
-    score = (coverage * 0.58 + precision * 0.27 + draft_score * 0.15) * quality * 100
-    return max(1, min(99, round(score)))
-
-
-def estimate_tokens(
-    agent_id: str,
-    prompt: str,
-    selected: list[dict[str, Any]],
     answer: str,
-    drafts: list[dict[str, str]],
-) -> int:
-    profile = AGENTS[agent_id]
-    inbox_words = sum(len((email["subject"] + " " + email["body"] + " " + email["expected_action"]).split()) for email in selected)
-    output_words = len(answer.split()) + sum(len(draft["body"].split()) for draft in drafts)
-    base = len(prompt.split()) * 4 + inbox_words * 2.5 + output_words * 2.2 + 580
-    if agent_id != "cascade":
-        base += len(SYNTHETIC_INBOX) * 42
-    else:
-        base += len(selected) * 36
-    return int(base * profile["token_scale"])
+) -> dict[str, Any]:
+    selected_ids = {email["id"] for email in selected}
+    matched_ids = {email["id"] for email in matched}
+    checks = [
+        {
+            "label": "Found relevant email",
+            "passed": bool(selected),
+            "detail": f"{len(selected)} email{'s' if len(selected) != 1 else ''} selected.",
+        },
+        {
+            "label": "Answered with mailbox content",
+            "passed": answer_is_grounded(answer, selected),
+            "detail": "The response includes sender, subject, or message-specific terms from the selected email.",
+        },
+    ]
+    if matched_ids:
+        checks.append(
+            {
+                "label": "Matched prompt target",
+                "passed": matched_ids.issubset(selected_ids),
+                "detail": f"Expected {len(matched_ids)} target email{'s' if len(matched_ids) != 1 else ''}.",
+            }
+        )
+    if intent["wants_reply"]:
+        needed = len([email for email in selected if email["needs_response"]])
+        checks.append(
+            {
+                "label": "Prepared requested drafts",
+                "passed": len(drafts) >= min(int(intent["count"]), needed),
+                "detail": f"{len(drafts)} draft{'s' if len(drafts) != 1 else ''} prepared.",
+            }
+        )
+    if intent["wants_archive"]:
+        checks.append(
+            {
+                "label": "Chose archive candidates",
+                "passed": bool(selected) and all(email["urgency"] in {"low", "medium"} or not email["needs_response"] for email in selected),
+                "detail": "Selected emails have low action pressure.",
+            }
+        )
+    passed = sum(1 for check in checks if check["passed"])
+    return {
+        "state": "complete" if passed == len(checks) else "needs_review",
+        "passed_checks": passed,
+        "total_checks": len(checks),
+        "checks": checks,
+    }
+
+
+def answer_is_grounded(answer: str, selected: list[dict[str, Any]]) -> bool:
+    answer_text = str(answer or "").lower()
+    if len(answer_text.split()) < 5 or not selected:
+        return False
+    for email in selected:
+        if email["from_name"].lower() in answer_text or email["subject"].lower() in answer_text:
+            return True
+        keywords = content_keywords(email)
+        if sum(1 for keyword in keywords if keyword in answer_text) >= 3:
+            return True
+    return False
+
+
+def content_keywords(email: dict[str, Any]) -> list[str]:
+    text = " ".join(
+        [
+            email["from_name"],
+            email["subject"],
+            email["body"],
+            email["expected_action"],
+            " ".join(email["tags"]),
+        ]
+    )
+    return [
+        term
+        for term in prompt_terms(text)
+        if len(term) >= 5 and term not in {"email", "reply", "action", "needed", "today"}
+    ][:18]
+
+
+def run_summary(results: list[dict[str, Any]], matched: list[dict[str, Any]]) -> dict[str, Any]:
+    states = [result["completion"]["state"] for result in results]
+    return {
+        "state": "complete" if states and all(state == "complete" for state in states) else "needs_review",
+        "agents_completed": len(results),
+        "matched_emails": len(matched),
+        "drafts_created": sum(len(result["drafts"]) for result in results),
+        "operations_prepared": sum(len(result["operations"]) for result in results),
+        "total_tokens": sum(int(result.get("tokens") or 0) for result in results),
+        "total_cost_usd": round(sum(float(result.get("cost_usd") or 0) for result in results), 6),
+        "providers_unavailable": sum(1 for result in results if result["status"] == "provider_unavailable"),
+    }
 
 
 def email_summary(email: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": email["id"],
+        "received": email["received"],
         "from_name": email["from_name"],
         "from_email": email["from_email"],
         "role": email["role"],
         "subject": email["subject"],
+        "body": email["body"],
         "category": email["category"],
         "priority": email["priority"],
         "urgency": email["urgency"],
@@ -915,7 +1694,7 @@ def prompt_match_score(email: dict[str, Any], terms: list[str]) -> float:
     return score
 
 
-def direct_lookup_answer(lead: str, selected: list[dict[str, Any]]) -> str:
+def direct_lookup_answer(selected: list[dict[str, Any]]) -> str:
     lines = []
     for email in selected:
         deadline = f" Deadline: {email['deadline']}." if email.get("deadline") else ""
@@ -923,13 +1702,17 @@ def direct_lookup_answer(lead: str, selected: list[dict[str, Any]]) -> str:
         lines.append(
             f"- {email['from_name']} said: {message_summary(email)} Action needed: {action}.{deadline}"
         )
-    lines.append(f"Agent route note: {lead}")
     return "\n".join(lines)
 
 
 def message_summary(email: dict[str, Any]) -> str:
     body = " ".join(str(email["body"]).split())
     return body if body.endswith((".", "!", "?")) else body + "."
+
+
+def sentence_anchor(email: dict[str, Any]) -> str:
+    sentence = re.split(r"(?<=[.!?])\s+", str(email["body"]).strip(), maxsplit=1)[0]
+    return sentence[:80]
 
 
 STOPWORDS = {
