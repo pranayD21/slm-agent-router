@@ -7,11 +7,15 @@
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <main>
+    <main class="app-shell">
       <header class="topbar">
-        <div>
-          <h1>Browser Agent Benchmark</h1>
-          <p class="subtitle">SLM Cascade vs frontier agents across browsers and games</p>
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">SLM</div>
+          <div>
+            <p class="eyebrow">Agent benchmark arena</p>
+            <h1>SLM Cascade Lab</h1>
+            <p class="subtitle">Side-by-side agent runs with live browsers, route telemetry, and GameWorld cost visuals.</p>
+          </div>
         </div>
         <div class="run-total" id="run-total">Idle</div>
       </header>
@@ -23,6 +27,16 @@
 
       <section id="browser-view" class="view active">
         <section class="controls" aria-label="Benchmark controls">
+          <div class="controls-head">
+            <div>
+              <p class="eyebrow">Live browser race</p>
+              <h2>Run the same task across selected agents</h2>
+            </div>
+            <div class="control-status">
+              <span>Timeout 75s</span>
+              <span>Parallel browsers</span>
+            </div>
+          </div>
           <label class="prompt-field">
             <span>Task prompt</span>
             <textarea id="task" rows="3">Go to https://example.com and report the page heading.</textarea>
@@ -49,9 +63,9 @@
           </details>
           <fieldset class="agents">
             <legend>Agents</legend>
-            <label><input type="checkbox" name="agent" value="cascade" checked> SLM Cascade <small id="model-cascade"></small></label>
-            <label><input type="checkbox" name="agent" value="openai" checked> OpenAI <small id="model-openai"></small></label>
-            <label><input type="checkbox" name="agent" value="claude" checked> Claude <small id="model-claude"></small></label>
+            <label class="agent-option"><input type="checkbox" name="agent" value="cascade" checked><span class="agent-name">SLM Cascade</span><small id="model-cascade"></small></label>
+            <label class="agent-option"><input type="checkbox" name="agent" value="openai" checked><span class="agent-name">OpenAI</span><small id="model-openai"></small></label>
+            <label class="agent-option"><input type="checkbox" name="agent" value="claude" checked><span class="agent-name">Claude</span><small id="model-claude"></small></label>
           </fieldset>
         </section>
 

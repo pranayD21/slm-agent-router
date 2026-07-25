@@ -155,6 +155,8 @@ function handleEvent(event) {
   if (event.type === "agent_started") {
     const panel = panels.get(event.agent_id) || createPanel(event.agent_id);
     panel.status.textContent = "Running";
+    panel.status.classList.add("running");
+    panel.status.classList.remove("done", "blocked", "error");
     panel.model.textContent = event.model || "";
     panel.badge.textContent = event.badge || "";
     panel.startedAt = Date.now();
@@ -240,6 +242,7 @@ function finishAgent(event) {
   panel.timer.textContent = `${(event.elapsed_ms / 1000).toFixed(2)}s`;
   panel.steps.textContent = `${event.steps} step${event.steps === 1 ? "" : "s"}`;
   panel.status.textContent = event.status;
+  panel.status.classList.remove("running");
   panel.status.classList.toggle("done", event.status === "completed");
   panel.status.classList.toggle("blocked", event.status === "blocked");
   panel.status.classList.toggle("error", event.status === "error");
