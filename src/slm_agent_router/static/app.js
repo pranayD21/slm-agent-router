@@ -9,12 +9,17 @@ const gameworldCards = document.querySelector("#gameworld-cards");
 const gameworldSource = document.querySelector("#gameworld-source");
 const gameGrid = document.querySelector("#game-grid");
 const traceLanes = document.querySelector("#trace-lanes");
+const playbackTabs = document.querySelector("#playback-tabs");
+const playbackStage = document.querySelector("#playback-stage");
 const panels = new Map();
 let eventSource = null;
 let timers = new Map();
 let runStartedAt = 0;
 let totalTimer = null;
 let serverConfig = {};
+let playbackTimer = null;
+let activePlayback = null;
+let activePlaybackStep = 0;
 
 const labels = {
   cascade: "SLM Cascade",
@@ -284,6 +289,7 @@ function renderGameWorld(report) {
   renderBarChart("#time-chart", models, "median_time_s", { suffix: "s", higherIsBetter: false });
   renderBarChart("#cost-chart", models, "estimated_cost_usd", { prefix: "$", higherIsBetter: false });
   renderBarChart("#cost-success-chart", models, "cost_per_success_usd", { prefix: "$", higherIsBetter: false });
+  renderPlaybackSelector(report.playbacks || [], models);
   renderGameGrid(games, models);
   renderTraceLanes(report.traces || [], models);
 }
@@ -355,6 +361,190 @@ function renderTraceLanes(traces, models) {
       </div>`;
     })
     .join("");
+}
+
+function renderPlaybackSelector(playbacks, models) {
+  if (!playbackTabs || !playbackStage) return;
+  if (!playbacks.length) {
+    if (playbackTimer) window.clearInterval(playbackTimer);
+    playbackTabs.innerHTML = "";
+    playbackStage.innerHTML = `<div class="playback-empty">No task playback traces loaded.</div>`;
+    return;
+  }
+  if (!activePlayback || !playbacks.some((playback) => playback.id === activePlayback.id)) {
+    activePlayback = playbacks[0];
+  }
+  playbackTabs.innerHTML = playbacks
+    .map(
+      (playback) => `<button class="playback-tab${playback.id === activePlayback.id ? " active" : ""}" type="button" role="tab" aria-selected="${playback.id === activePlayback.id ? "true" : "false"}" data-playback="${escapeHtml(playback.id)}">
+        ${escapeHtml(playback.name || playback.id)}
+      </button>`
+    )
+    .join("");
+  playbackTabs.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const playback = playbacks.find((item) => item.id === button.dataset.playback);
+      if (playback) selectPlayback(playback, models);
+    });
+  });
+  selectPlayback(activePlayback, models);
+}
+
+function selectPlayback(playback, models) {
+  activePlayback = playback;
+  activePlaybackStep = 0;
+  playbackTabs?.querySelectorAll("button").forEach((button) => {
+    const selected = button.dataset.playback === playback.id;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+  renderPlaybackFrame(playback, models);
+  startPlayback(models);
+}
+
+function startPlayback(models) {
+  if (playbackTimer) window.clearInterval(playbackTimer);
+  const frameCount = maxPlaybackFrames(activePlayback);
+  if (frameCount <= 1) return;
+  playbackTimer = window.setInterval(() => {
+    activePlaybackStep = (activePlaybackStep + 1) % frameCount;
+    renderPlaybackFrame(activePlayback, models);
+  }, 1350);
+}
+
+function maxPlaybackFrames(playback) {
+  return Math.max(
+    ...Object.values(playback?.models || {}).map((model) => (Array.isArray(model.frames) ? model.frames.length : 0)),
+    0
+  );
+}
+
+function renderPlaybackFrame(playback, models) {
+  if (!playbackStage || !playback) return;
+  const modelRows = models.length
+    ? models
+    : Object.keys(playback.models || {}).map((id) => ({ id, label: labels[id] || id }));
+  const frameCount = Math.max(maxPlaybackFrames(playback), 1);
+  playbackStage.innerHTML = `
+    <div class="playback-task">
+      <div>
+        <span>${escapeHtml(playback.genre || "Game")}</span>
+        <h3>${escapeHtml(playback.name || "GameWorld task")}</h3>
+        <p>${escapeHtml(playback.task || "")}</p>
+      </div>
+      <div class="playback-clock">Frame ${Math.min(activePlaybackStep + 1, frameCount)} / ${frameCount}</div>
+    </div>
+    <div class="playback-grid">
+      ${modelRows
+        .map((model) => renderPlaybackCard(playback, model, activePlaybackStep))
+        .join("")}
+    </div>
+  `;
+}
+
+function renderPlaybackCard(playback, model, stepIndex) {
+  const data = playback.models?.[model.id] || {};
+  const frames = Array.isArray(data.frames) ? data.frames : [];
+  const frame = frames[Math.min(stepIndex, Math.max(frames.length - 1, 0))] || {};
+  const routeKind = playbackRouteKind(frame.route || (model.id === "cascade" ? "SLM" : "LLM"));
+  const step = Number(frame.step || Math.min(stepIndex + 1, frames.length || 1));
+  const progress = frames.length ? ((Math.min(stepIndex, frames.length - 1) + 1) / frames.length) * 100 : 0;
+  const detail =
+    playback.kind === "2048"
+      ? `Score ${formatNumber(frame.score || 0)}`
+      : `Inventory ${formatInventory(frame.inventory)}`;
+  return `<article class="playback-card" data-model="${escapeHtml(model.id)}">
+    <div class="playback-card-head">
+      <div>
+        <h3>${escapeHtml(model.label || labels[model.id] || model.id)}</h3>
+        <p>${escapeHtml(data.outcome || "Task in progress")}</p>
+      </div>
+      <span>${formatNumber(data.time_s || 0)}s</span>
+    </div>
+    <div class="playback-visual">${renderPlaybackVisual(playback, frame)}</div>
+    <div class="playback-action">
+      <span class="route-chip ${routeKind}">${routeKind === "slm" ? "SLM" : "LLM"}</span>
+      <b>Step ${step}</b>
+      <span>${escapeHtml(frame.action || "observe")}</span>
+    </div>
+    <div class="playback-progress" aria-label="Playback progress"><i style="width:${progress.toFixed(2)}%"></i></div>
+    <div class="playback-stats">
+      <span>${escapeHtml(detail)}</span>
+      <span>${formatNumber(data.tokens || 0)} tokens</span>
+      <span>$${formatMoney(data.cost_usd || 0)}</span>
+    </div>
+  </article>`;
+}
+
+function renderPlaybackVisual(playback, frame) {
+  if (playback.kind === "2048") return render2048Board(frame.grid || []);
+  if (playback.kind === "minecraft") return renderMinecraftMap(playback, frame);
+  return `<div class="playback-empty">No visual renderer for this task.</div>`;
+}
+
+function render2048Board(grid) {
+  const cells = Array.isArray(grid) ? grid.flat().slice(0, 16) : [];
+  while (cells.length < 16) cells.push(0);
+  return `<div class="game-2048" aria-label="2048 board">
+    ${cells
+      .map((value) => {
+        const number = Number(value || 0);
+        return `<span class="tile ${tileClass(number)}">${number ? escapeHtml(number) : ""}</span>`;
+      })
+      .join("")}
+  </div>`;
+}
+
+function renderMinecraftMap(playback, frame) {
+  const rows = Array.isArray(frame.map) ? frame.map : [];
+  const [agentX, agentY] = Array.isArray(frame.agent) ? frame.agent : [-1, -1];
+  const width = Math.max(...rows.map((row) => String(row).length), 1);
+  const legend = playback.legend || {};
+  return `<div class="minecraft-map" style="--cols:${width}" aria-label="Minecraft sandbox map">
+    ${rows
+      .map((row, y) =>
+        Array.from(String(row).padEnd(width, "."))
+          .map((tile, x) => {
+            const hasAgent = x === agentX && y === agentY;
+            const label = hasAgent ? "agent" : legend[tile] || "tile";
+            const text = hasAgent ? "A" : tile === "." ? "" : tile;
+            return `<span class="mc-cell ${minecraftTileClass(tile)}${hasAgent ? " agent" : ""}" title="${escapeHtml(label)}">${escapeHtml(text)}</span>`;
+          })
+          .join("")
+      )
+      .join("")}
+  </div>`;
+}
+
+function tileClass(value) {
+  if (!value) return "tile-empty";
+  if (value >= 512) return "tile-v512";
+  if (value >= 256) return "tile-v256";
+  if (value >= 128) return "tile-v128";
+  return `tile-v${value}`;
+}
+
+function minecraftTileClass(value) {
+  const classes = {
+    ".": "grass",
+    T: "tree",
+    L: "log",
+    C: "crafting",
+    W: "water",
+    P: "planks",
+  };
+  return classes[value] || "grass";
+}
+
+function playbackRouteKind(value) {
+  const route = String(value || "").toLowerCase();
+  if (route.includes("slm")) return "slm";
+  if (route.includes("llm")) return "llm";
+  return normalizeRouteKind(route);
+}
+
+function formatInventory(items) {
+  return Array.isArray(items) && items.length ? items.join(", ") : "empty";
 }
 
 function bestBy(rows, key) {

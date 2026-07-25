@@ -140,6 +140,110 @@ DEMO_REPORT: dict[str, Any] = {
         {"model": "claude", "label": "Act", "start": 15, "duration": 24, "kind": "llm"},
         {"model": "claude", "label": "Recover", "start": 39, "duration": 10, "kind": "llm"},
     ],
+    "playbacks": [
+        {
+            "id": "2048",
+            "name": "2048",
+            "genre": "Puzzle",
+            "kind": "2048",
+            "task": "Reach a 512 tile",
+            "models": {
+                "cascade": {
+                    "outcome": "512 tile reached",
+                    "time_s": 16.8,
+                    "tokens": 1320,
+                    "cost_usd": 0.018,
+                    "frames": [
+                        {"step": 1, "action": "scan board", "route": "SLM", "score": 40, "grid": [[2, 0, 0, 2], [4, 4, 0, 0], [8, 0, 2, 0], [0, 0, 0, 0]]},
+                        {"step": 2, "action": "swipe left", "route": "SLM", "score": 92, "grid": [[4, 0, 0, 0], [8, 0, 0, 0], [8, 2, 2, 0], [2, 0, 0, 0]]},
+                        {"step": 3, "action": "swipe up", "route": "SLM", "score": 188, "grid": [[4, 2, 2, 0], [16, 0, 0, 0], [2, 0, 0, 0], [0, 0, 0, 0]]},
+                        {"step": 4, "action": "merge column", "route": "LLM", "score": 452, "grid": [[4, 2, 2, 0], [16, 0, 0, 0], [32, 16, 4, 0], [64, 32, 8, 2]]},
+                        {"step": 5, "action": "hold corner", "route": "SLM", "score": 980, "grid": [[4, 2, 0, 0], [16, 4, 2, 0], [64, 32, 8, 2], [128, 64, 16, 4]]},
+                        {"step": 6, "action": "finish merge", "route": "SLM", "score": 1684, "grid": [[8, 4, 2, 0], [32, 8, 4, 2], [128, 32, 8, 4], [512, 64, 16, 8]]},
+                    ],
+                },
+                "openai": {
+                    "outcome": "512 tile reached",
+                    "time_s": 22.4,
+                    "tokens": 2910,
+                    "cost_usd": 0.046,
+                    "frames": [
+                        {"step": 1, "action": "plan corner strategy", "route": "LLM", "score": 40, "grid": [[2, 0, 0, 2], [4, 4, 0, 0], [8, 0, 2, 0], [0, 0, 0, 0]]},
+                        {"step": 2, "action": "swipe left", "route": "LLM", "score": 92, "grid": [[4, 0, 0, 0], [8, 0, 0, 0], [8, 2, 2, 0], [2, 0, 0, 0]]},
+                        {"step": 3, "action": "swipe down", "route": "LLM", "score": 220, "grid": [[0, 0, 0, 0], [4, 0, 0, 0], [16, 2, 0, 0], [8, 2, 2, 2]]},
+                        {"step": 4, "action": "recover corner", "route": "LLM", "score": 612, "grid": [[2, 0, 0, 0], [4, 2, 0, 0], [32, 8, 4, 0], [128, 32, 8, 2]]},
+                        {"step": 5, "action": "merge left", "route": "LLM", "score": 1196, "grid": [[4, 2, 0, 0], [8, 4, 2, 0], [64, 16, 4, 0], [256, 32, 8, 2]]},
+                        {"step": 6, "action": "complete chain", "route": "LLM", "score": 1712, "grid": [[4, 2, 0, 0], [16, 4, 2, 0], [128, 32, 8, 4], [512, 64, 16, 8]]},
+                    ],
+                },
+                "claude": {
+                    "outcome": "512 tile reached",
+                    "time_s": 24.1,
+                    "tokens": 3180,
+                    "cost_usd": 0.052,
+                    "frames": [
+                        {"step": 1, "action": "inspect board", "route": "LLM", "score": 40, "grid": [[2, 0, 0, 2], [4, 4, 0, 0], [8, 0, 2, 0], [0, 0, 0, 0]]},
+                        {"step": 2, "action": "swipe left", "route": "LLM", "score": 92, "grid": [[4, 0, 0, 0], [8, 0, 0, 0], [8, 2, 2, 0], [2, 0, 0, 0]]},
+                        {"step": 3, "action": "swipe left", "route": "LLM", "score": 128, "grid": [[4, 2, 0, 0], [8, 2, 0, 0], [8, 4, 0, 0], [2, 0, 0, 0]]},
+                        {"step": 4, "action": "rebuild stack", "route": "LLM", "score": 488, "grid": [[4, 2, 0, 0], [16, 4, 2, 0], [32, 8, 4, 0], [64, 16, 8, 2]]},
+                        {"step": 5, "action": "combine base", "route": "LLM", "score": 1016, "grid": [[4, 2, 0, 0], [16, 4, 2, 0], [64, 16, 8, 2], [256, 32, 16, 4]]},
+                        {"step": 6, "action": "complete objective", "route": "LLM", "score": 1656, "grid": [[8, 4, 2, 0], [32, 8, 4, 2], [128, 32, 8, 4], [512, 64, 16, 8]]},
+                    ],
+                },
+            },
+        },
+        {
+            "id": "minecraft",
+            "name": "Minecraft Sandbox",
+            "genre": "Sandbox",
+            "kind": "minecraft",
+            "task": "Collect wood and craft planks",
+            "legend": {".": "grass", "T": "tree", "L": "log", "C": "crafting", "W": "water", "P": "planks"},
+            "models": {
+                "cascade": {
+                    "outcome": "Planks crafted",
+                    "time_s": 28.2,
+                    "tokens": 2380,
+                    "cost_usd": 0.062,
+                    "frames": [
+                        {"step": 1, "action": "locate nearest tree", "route": "SLM", "inventory": [], "agent": [1, 3], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 2, "action": "move north-east", "route": "SLM", "inventory": [], "agent": [2, 2], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 3, "action": "mine trunk", "route": "SLM", "inventory": ["log"], "agent": [2, 1], "map": ["..L....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 4, "action": "route to crafting table", "route": "LLM", "inventory": ["log"], "agent": [4, 2], "map": [".......", "..L....", ".T...C.", ".......", "..W...."]},
+                        {"step": 5, "action": "craft planks", "route": "SLM", "inventory": ["planks x4"], "agent": [5, 2], "map": [".......", "..L....", ".T..PC.", ".......", "..W...."]},
+                    ],
+                },
+                "openai": {
+                    "outcome": "Planks crafted",
+                    "time_s": 37.6,
+                    "tokens": 5140,
+                    "cost_usd": 0.157,
+                    "frames": [
+                        {"step": 1, "action": "inspect biome", "route": "LLM", "inventory": [], "agent": [1, 3], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 2, "action": "move to visible tree", "route": "LLM", "inventory": [], "agent": [1, 2], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 3, "action": "mine wood", "route": "LLM", "inventory": ["log"], "agent": [1, 2], "map": ["..T....", ".......", ".L...C.", ".......", "..W...."]},
+                        {"step": 4, "action": "pathfind around water", "route": "LLM", "inventory": ["log"], "agent": [3, 2], "map": ["..T....", ".......", ".L...C.", ".......", "..W...."]},
+                        {"step": 5, "action": "open crafting", "route": "LLM", "inventory": ["log"], "agent": [5, 2], "map": ["..T....", ".......", ".L...C.", ".......", "..W...."]},
+                        {"step": 6, "action": "craft planks", "route": "LLM", "inventory": ["planks x4"], "agent": [5, 2], "map": ["..T....", ".......", ".L..PC.", ".......", "..W...."]},
+                    ],
+                },
+                "claude": {
+                    "outcome": "Planks crafted",
+                    "time_s": 39.8,
+                    "tokens": 5520,
+                    "cost_usd": 0.171,
+                    "frames": [
+                        {"step": 1, "action": "survey resources", "route": "LLM", "inventory": [], "agent": [1, 3], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 2, "action": "move to upper tree", "route": "LLM", "inventory": [], "agent": [2, 1], "map": ["..T....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 3, "action": "collect log", "route": "LLM", "inventory": ["log"], "agent": [2, 0], "map": ["..L....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 4, "action": "reroute to bench", "route": "LLM", "inventory": ["log"], "agent": [3, 1], "map": ["..L....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 5, "action": "confirm recipe", "route": "LLM", "inventory": ["log"], "agent": [5, 2], "map": ["..L....", ".......", ".T...C.", ".......", "..W...."]},
+                        {"step": 6, "action": "craft planks", "route": "LLM", "inventory": ["planks x4"], "agent": [5, 2], "map": ["..L....", ".......", ".T..PC.", ".......", "..W...."]},
+                    ],
+                },
+            },
+        },
+    ],
 }
 
 
@@ -160,6 +264,8 @@ def normalize_report(raw: dict[str, Any], source: str) -> dict[str, Any]:
         report = dict(raw)
         report.setdefault("benchmark", "GameWorld")
         report.setdefault("mode", "imported")
+        report.setdefault("traces", [])
+        report.setdefault("playbacks", [])
         report["source"] = source
         return report
     runs = raw.get("runs") or raw.get("trials") or []
@@ -178,6 +284,7 @@ def normalize_report(raw: dict[str, Any], source: str) -> dict[str, Any]:
         "models": models,
         "games": games,
         "traces": raw.get("traces", []),
+        "playbacks": raw.get("playbacks", []),
     }
 
 

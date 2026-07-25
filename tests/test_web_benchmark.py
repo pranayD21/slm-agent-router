@@ -258,10 +258,14 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"cascade", "openai", "claude"}, model_ids)
         self.assertGreaterEqual(len(report["games"]), 3)
         self.assertIn("winner", report["summary"])
+        playback_ids = {playback["id"] for playback in report["playbacks"]}
+        self.assertIn("2048", playback_ids)
+        self.assertIn("minecraft", playback_ids)
 
     def test_gameworld_normalizes_run_logs(self):
         report = normalize_report(
             {
+                "playbacks": [{"id": "2048", "models": {}}],
                 "runs": [
                     {
                         "model": "cascade",
@@ -291,6 +295,7 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["mode"], "imported")
         self.assertEqual(len(report["models"]), 2)
         self.assertEqual(report["games"][0]["scores"]["cascade"], 1.0)
+        self.assertEqual(report["playbacks"][0]["id"], "2048")
 
 
 if __name__ == "__main__":
