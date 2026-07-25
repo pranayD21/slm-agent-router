@@ -20,7 +20,15 @@ from slm_agent_router.web_benchmark import (
     validate_action,
 )
 from slm_agent_router.gameworld import gameworld_report, normalize_report
-from slm_agent_router.inbox_benchmark import deterministic_inbox_providers, inbox_snapshot, run_inbox_comparison
+from slm_agent_router.inbox_benchmark import (
+    InboxCascadeProvider,
+    InboxProviderOutput,
+    analyze_prompt,
+    deterministic_inbox_providers,
+    inbox_context_for_agent,
+    inbox_snapshot,
+    run_inbox_comparison,
+)
 from slm_agent_router.webui_benchmarks import normalize_report as normalize_webui_report
 from slm_agent_router.webui_benchmarks import webui_benchmark_report
 import asyncio
@@ -36,6 +44,34 @@ class StaticProvider(ActionProvider):
 
     async def decide(self, task, snapshot, history):
         return ProviderDecision(self.action, "{}", self.model, 1)
+
+
+class StaticInboxProvider:
+    def __init__(self, outputs, provider="ollama", model="test-inbox"):
+        self.outputs = list(outputs)
+        self.provider = provider
+        self.model = model
+        self.calls = []
+
+    async def complete(self, prompt, intent, emails):
+        self.calls.append({"prompt": prompt, "messages": len(emails)})
+        index = min(len(self.calls) - 1, len(self.outputs) - 1)
+        return self.outputs[index]
+
+
+def inbox_provider_output(provider="ollama", model="test", ids=None, answer="", confidence=0.5):
+    return InboxProviderOutput(
+        provider=provider,
+        model=model,
+        selected_email_ids=ids or [],
+        answer=answer,
+        drafts=[],
+        operations=[],
+        raw="{}",
+        input_tokens=100,
+        output_tokens=40,
+        confidence=confidence,
+    )
 
 
 class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
@@ -385,6 +421,85 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         for result in run["results"]:
             self.assertGreaterEqual(len(result["drafts"]), 1)
             self.assertLessEqual(len(result["drafts"]), 3)
+
+    async def test_inbox_cascade_accepts_high_confidence_ollama_without_fallback(self):
+        prompt = "what did nora say"
+        intent = analyze_prompt(prompt)
+        local_context = inbox_context_for_agent(prompt, intent, "cascade")
+        local = StaticInboxProvider(
+            [
+                inbox_provider_output(
+                    model="llama-test",
+                    ids=["E-1005"],
+                    answer="Nora Patel said Summit Bank returned MSA redlines around liability cap, audit rights, and data retention.",
+                    confidence=0.92,
+                )
+            ],
+            provider="ollama",
+            model="llama-test",
+        )
+        fallback = StaticInboxProvider(
+            [
+                inbox_provider_output(
+                    provider="openai",
+                    model="gpt-test",
+                    ids=["E-1005"],
+                    answer="Fallback should not be called.",
+                    confidence=0.95,
+                )
+            ],
+            provider="openai",
+            model="gpt-test",
+        )
+        cascade = InboxCascadeProvider(local, [fallback], confidence_threshold=0.72, max_local_retries=1)
+
+        output = await cascade.complete(prompt, intent, local_context)
+
+        self.assertEqual("cascade", output.provider)
+        self.assertIn("ollama:llama-test", output.model)
+        self.assertEqual(["E-1005"], output.selected_email_ids)
+        self.assertEqual(1, len(local.calls))
+        self.assertEqual(0, len(fallback.calls))
+        self.assertTrue(any(event["label"] == "Validate local answer" for event in output.route_events))
+
+    async def test_inbox_cascade_retries_then_falls_back_after_weak_local_answers(self):
+        prompt = "what did nora say"
+        intent = analyze_prompt(prompt)
+        local_context = inbox_context_for_agent(prompt, intent, "cascade")
+        local = StaticInboxProvider(
+            [
+                inbox_provider_output(answer="I am not sure.", confidence=0.2),
+                inbox_provider_output(model="llama-test", ids=["E-1001"], answer="Maya asked for metrics.", confidence=0.48),
+            ],
+            provider="ollama",
+            model="llama-test",
+        )
+        fallback = StaticInboxProvider(
+            [
+                inbox_provider_output(
+                    provider="openai",
+                    model="gpt-test",
+                    ids=["E-1005"],
+                    answer="Nora Patel said Summit Bank returned MSA redlines around liability cap, audit rights, and data retention.",
+                    confidence=0.91,
+                )
+            ],
+            provider="openai",
+            model="gpt-test",
+        )
+        cascade = InboxCascadeProvider(local, [fallback], confidence_threshold=0.72, max_local_retries=1)
+
+        output = await cascade.complete(prompt, intent, local_context)
+
+        self.assertEqual("cascade", output.provider)
+        self.assertIn("-> openai:gpt-test", output.model)
+        self.assertEqual(["E-1005"], output.selected_email_ids)
+        self.assertEqual(2, len(local.calls))
+        self.assertEqual(1, len(fallback.calls))
+        labels = [event["label"] for event in output.route_events]
+        self.assertIn("Retry/replan", labels)
+        self.assertIn("Openai fallback", labels)
+        self.assertGreater(output.cost_usd, 0)
 
 
 if __name__ == "__main__":

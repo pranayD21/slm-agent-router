@@ -43,7 +43,7 @@ The OpenAI and Claude comparison agents use the same browser tool surface as the
 
 The inbox manager uses real model calls when the app runs:
 
-- SLM Cascade calls Ollama at `OLLAMA_BASE_URL` with `OLLAMA_MODEL` (default `llama3.2:1b`).
+- SLM Cascade first scores the local synthetic inbox, sends the best subset to Ollama at `OLLAMA_BASE_URL` with `OLLAMA_MODEL` (default `llama3.2:1b`), validates confidence and citations, retries once with broader context when needed, then falls back to OpenAI or Claude only if the local path still fails.
 - OpenAI Agent calls the OpenAI Responses API with `OPENAI_API_KEY` and `OPENAI_MODEL` (default `gpt-5.6-sol`).
 - Claude Agent calls the Anthropic Messages API with `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` (default `claude-sonnet-5`).
 
@@ -61,7 +61,7 @@ export OLLAMA_MODEL="llama3.2:1b"
 slm-router serve --host 127.0.0.1 --port 8000
 ```
 
-If a provider is missing or offline, its card is marked unavailable instead of showing simulated output.
+If a provider is missing or offline, its card is marked unavailable instead of showing simulated output. The cascade trace shows the real route events, including local retrieval, Ollama attempts, validator decisions, retries, fallback calls, confidence, latency, and token counts.
 
 ## GameWorld benchmark dashboard
 

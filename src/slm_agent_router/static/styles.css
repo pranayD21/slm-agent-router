@@ -486,6 +486,13 @@ button:disabled {
   border-color: #ebd2a6;
 }
 
+.route-count.validator,
+.route-chip.validator {
+  color: #5a427c;
+  background: #f6f0ff;
+  border-color: #d7c5f5;
+}
+
 .route-count.unavailable,
 .route-chip.unavailable,
 .route-count.unknown,

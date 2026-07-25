@@ -258,6 +258,7 @@ function resultCard(result) {
       <span><b>${escapeHtml(formatDuration(result.runtime_ms))}</b> Measured</span>
       <span><b>${formatNumber(result.tokens || 0)}</b> Tokens</span>
       <span><b>$${formatMoney(result.cost_usd || 0)}</b> Cost</span>
+      <span><b>${formatPercent(result.confidence || 0)}</b> Confidence</span>
       <span><b>${formatNumber(work.messages_matched || 0)}</b> Emails</span>
       <span><b>${formatNumber(work.drafts_created || 0)}</b> Drafts</span>
     </div>
@@ -272,9 +273,26 @@ function resultCard(result) {
     ${renderOperations(result.operations)}
     ${renderDrafts(result.drafts)}
     <ol class="agent-trace">
-      ${result.actions.map((action) => `<li><span class="route-chip ${escapeHtml(action.route)}">${escapeHtml(action.label)}</span><small>${escapeHtml(action.detail)}</small></li>`).join("")}
+      ${result.actions.map((action) => `<li><span class="route-chip ${escapeHtml(action.route)}">${escapeHtml(action.label)}</span><small>${escapeHtml(action.detail)}${routeEventMeta(action)}</small></li>`).join("")}
     </ol>
   </article>`;
+}
+
+function routeEventMeta(action) {
+  const parts = [];
+  if (Number.isFinite(Number(action.confidence)) && Number(action.confidence) > 0) {
+    parts.push(`${formatPercent(action.confidence)} conf`);
+  }
+  if (Number(action.tokens) > 0) {
+    parts.push(`${formatNumber(action.tokens)} tokens`);
+  }
+  if (Number(action.latency_ms) > 0) {
+    parts.push(formatDuration(action.latency_ms));
+  }
+  if (Number(action.messages) > 0) {
+    parts.push(`${formatNumber(action.messages)} msgs`);
+  }
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
 }
 
 function selectedEmailRow(email) {
@@ -445,6 +463,10 @@ function formatMoney(value) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function formatPercent(value) {
+  return `${Math.round(Number(value || 0) * 100)}%`;
 }
 
 function shorten(value, limit) {

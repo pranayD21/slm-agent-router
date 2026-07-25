@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,7 +13,7 @@ AGENTS: dict[str, dict[str, Any]] = {
     "cascade": {
         "label": "SLM Cascade",
         "model": os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
-        "route": ["Local retrieval", "Ollama SLM call", "Validate answer", "Prepare actions"],
+        "route": ["Local retrieval", "Ollama SLM call", "Validate answer", "Retry or fallback if needed"],
     },
     "openai": {
         "label": "OpenAI Agent",
@@ -71,8 +71,14 @@ INBOX_RESULT_SCHEMA: dict[str, Any] = {
                 "required": ["type", "email_id", "label", "reason"],
             },
         },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Your confidence that the selected emails and answer fully satisfy the user's request.",
+        },
     },
-    "required": ["selected_email_ids", "answer", "drafts", "operations"],
+    "required": ["selected_email_ids", "answer", "drafts", "operations", "confidence"],
 }
 
 
@@ -87,6 +93,7 @@ Rules:
 - If the user asks for drafts, create realistic draft replies in drafts.
 - If the user asks to archive, include archive operations for safe candidates.
 - The answer field must be the user-visible output, not a note that an agent ran.
+- confidence must be between 0 and 1. Use lower confidence when the prompt target is ambiguous, selected emails may be incomplete, or the answer is thin.
 - Be concise, but include enough content for a person to act on the email."""
 
 
@@ -102,6 +109,10 @@ class InboxProviderOutput:
     input_tokens: int = 0
     output_tokens: int = 0
     error: str | None = None
+    confidence: float = 0.0
+    cost_usd: float | None = None
+    route_events: list[dict[str, Any]] = field(default_factory=list)
+    messages_sent_to_model: int | None = None
 
 
 SYNTHETIC_INBOX: list[dict[str, Any]] = [
@@ -690,6 +701,9 @@ async def run_agent(
     input_tokens = output.input_tokens or estimate_text_tokens(build_inbox_prompt(prompt, intent, model_context))
     output_tokens = output.output_tokens or estimate_text_tokens(answer + " " + " ".join(draft["body"] for draft in drafts))
     tokens = input_tokens + output_tokens
+    cost_usd = output.cost_usd
+    if cost_usd is None:
+        cost_usd = estimate_provider_cost_usd(agent_id, output.model, input_tokens, output_tokens)
     return {
         "agent_id": agent_id,
         "label": profile["label"],
@@ -705,11 +719,14 @@ async def run_agent(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "tokens": tokens,
-        "cost_usd": round(estimate_provider_cost_usd(agent_id, output.model, input_tokens, output_tokens), 6),
+        "cost_usd": round(cost_usd, 6),
+        "confidence": round(float(output.confidence or 0), 3),
         "raw_response": output.raw[:1200],
         "work": {
             "messages_scanned": len(SYNTHETIC_INBOX),
-            "messages_sent_to_model": len(model_context),
+            "messages_sent_to_model": output.messages_sent_to_model
+            if output.messages_sent_to_model is not None
+            else len(model_context),
             "messages_matched": len(selected),
             "drafts_created": len(drafts),
             "actions_prepared": len(operations),
@@ -892,6 +909,216 @@ class OllamaInboxProvider(InboxProvider):
             return unavailable_output("ollama", self.model, f"Ollama call failed: {safe_error(exc)}")
 
 
+class InboxCascadeProvider(InboxProvider):
+    provider = "cascade"
+
+    def __init__(
+        self,
+        local_provider: InboxProvider,
+        fallback_providers: list[InboxProvider],
+        confidence_threshold: float | None = None,
+        fallback_confidence_threshold: float | None = None,
+        max_local_retries: int | None = None,
+    ):
+        self.local_provider = local_provider
+        self.fallback_providers = fallback_providers
+        self.confidence_threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else float(os.getenv("INBOX_CASCADE_CONFIDENCE_THRESHOLD", "0.72"))
+        )
+        self.fallback_confidence_threshold = (
+            fallback_confidence_threshold
+            if fallback_confidence_threshold is not None
+            else float(os.getenv("INBOX_CASCADE_FALLBACK_CONFIDENCE_THRESHOLD", "0.62"))
+        )
+        self.max_local_retries = (
+            max_local_retries
+            if max_local_retries is not None
+            else int(os.getenv("INBOX_CASCADE_MAX_LOCAL_RETRIES", "1"))
+        )
+        self.model = self.local_provider.model
+
+    async def complete(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        emails: list[dict[str, Any]],
+    ) -> InboxProviderOutput:
+        route_events: list[dict[str, Any]] = []
+        matched = select_emails(prompt, intent, agent_id="evaluator")
+        local_context = emails or inbox_context_for_agent(prompt, intent, "cascade")
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_messages_sent = 0
+        fallback_cost = 0.0
+        best_output: InboxProviderOutput | None = None
+        best_validation: dict[str, Any] | None = None
+
+        retrieval_confidence = local_retrieval_confidence(local_context, matched, intent)
+        route_events.append(
+            route_event(
+                "slm",
+                "Local retrieval",
+                f"Scored {len(SYNTHETIC_INBOX)} messages and sent top {len(local_context)} to Ollama.",
+                confidence=retrieval_confidence,
+                messages=len(local_context),
+            )
+        )
+
+        attempts = max(0, self.max_local_retries) + 1
+        for attempt_index in range(attempts):
+            attempt_started = time.perf_counter()
+            attempt_prompt = prompt
+            if best_validation:
+                attempt_prompt = retry_prompt(prompt, best_validation)
+            output = await self.local_provider.complete(attempt_prompt, intent, local_context)
+            output.confidence = output.confidence or inferred_output_confidence(output, prompt, intent, matched)
+            total_input_tokens += output.input_tokens
+            total_output_tokens += output.output_tokens
+            total_messages_sent += len(local_context)
+            route_events.append(
+                route_event(
+                    "slm",
+                    f"Ollama attempt {attempt_index + 1}",
+                    model_call_detail(output),
+                    confidence=output.confidence,
+                    latency_ms=duration_ms(attempt_started),
+                    tokens=output.input_tokens + output.output_tokens,
+                )
+            )
+
+            validation = validate_cascade_attempt(output, prompt, intent, matched, self.confidence_threshold)
+            route_events.append(
+                route_event(
+                    "validator",
+                    "Validate local answer",
+                    validation_detail(validation),
+                    confidence=validation["confidence"],
+                )
+            )
+            if is_better_validation(validation, best_validation):
+                best_output = output
+                best_validation = validation
+            if validation["accepted"]:
+                return cascade_output(
+                    output,
+                    model=f"ollama:{output.model}",
+                    route_events=route_events,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    cost_usd=0.0,
+                    messages_sent_to_model=total_messages_sent,
+                )
+            if attempt_index + 1 < attempts:
+                previous_count = len(local_context)
+                local_context = expanded_inbox_context(prompt, intent, local_context)
+                route_events.append(
+                    route_event(
+                        "slm",
+                        "Retry/replan",
+                        "Broadened local context from "
+                        f"{previous_count} to {len(local_context)} messages after {failure_summary(validation)}.",
+                        confidence=max(0.1, validation["confidence"] - 0.08),
+                        messages=len(local_context),
+                    )
+                )
+
+        fallback_result = await self.complete_with_fallback(
+            prompt,
+            intent,
+            matched,
+            route_events,
+            total_messages_sent,
+        )
+        if fallback_result:
+            output, fallback_input, fallback_output, fallback_cost, fallback_messages = fallback_result
+            total_input_tokens += fallback_input
+            total_output_tokens += fallback_output
+            total_messages_sent += fallback_messages
+            return cascade_output(
+                output,
+                model=f"ollama:{self.local_provider.model} -> {output.provider}:{output.model}",
+                route_events=route_events,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                cost_usd=fallback_cost,
+                messages_sent_to_model=total_messages_sent,
+            )
+
+        if best_output:
+            route_events.append(
+                route_event(
+                    "unavailable",
+                    "Fallback unavailable",
+                    "No configured cloud fallback accepted the handoff; showing the best local result for review.",
+                    confidence=best_validation["confidence"] if best_validation else best_output.confidence,
+                )
+            )
+            return cascade_output(
+                best_output,
+                model=f"ollama:{best_output.model}",
+                route_events=route_events,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                cost_usd=fallback_cost,
+                messages_sent_to_model=total_messages_sent,
+            )
+
+        unavailable = unavailable_output("cascade", self.local_provider.model, "The cascade could not produce a local or fallback answer.")
+        unavailable.route_events = route_events
+        unavailable.messages_sent_to_model = total_messages_sent
+        return unavailable
+
+    async def complete_with_fallback(
+        self,
+        prompt: str,
+        intent: dict[str, Any],
+        matched: list[dict[str, Any]],
+        route_events: list[dict[str, Any]],
+        messages_sent_before_fallback: int,
+    ) -> tuple[InboxProviderOutput, int, int, float, int] | None:
+        del messages_sent_before_fallback
+        for provider in self.fallback_providers:
+            fallback_started = time.perf_counter()
+            output = await provider.complete(prompt, intent, SYNTHETIC_INBOX)
+            output.confidence = output.confidence or inferred_output_confidence(output, prompt, intent, matched)
+            fallback_tokens = output.input_tokens + output.output_tokens
+            route_kind = "llm" if not output.error else "unavailable"
+            route_events.append(
+                route_event(
+                    route_kind,
+                    f"{provider.provider.title()} fallback",
+                    model_call_detail(output),
+                    confidence=output.confidence,
+                    latency_ms=duration_ms(fallback_started),
+                    tokens=fallback_tokens,
+                    messages=len(SYNTHETIC_INBOX),
+                )
+            )
+            if output.error:
+                continue
+            validation = validate_cascade_attempt(
+                output,
+                prompt,
+                intent,
+                matched,
+                self.fallback_confidence_threshold,
+            )
+            route_events.append(
+                route_event(
+                    "validator",
+                    "Validate fallback answer",
+                    validation_detail(validation),
+                    confidence=validation["confidence"],
+                )
+            )
+            if validation["accepted"]:
+                cost = estimate_provider_cost_usd(output.provider, output.model, output.input_tokens, output.output_tokens)
+                return output, output.input_tokens, output.output_tokens, cost, len(SYNTHETIC_INBOX)
+        return None
+
+
 class DeterministicInboxProvider(InboxProvider):
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
@@ -922,11 +1149,210 @@ class DeterministicInboxProvider(InboxProvider):
                     "answer": answer,
                     "drafts": drafts,
                     "operations": operations,
+                    "confidence": 0.95,
                 }
             ),
             input_tokens=120,
             output_tokens=80,
+            confidence=0.95,
         )
+
+
+def route_event(
+    route: str,
+    label: str,
+    detail: str,
+    *,
+    confidence: float | None = None,
+    latency_ms: float | None = None,
+    tokens: int | None = None,
+    messages: int | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "route": route,
+        "label": label,
+        "detail": detail,
+    }
+    if confidence is not None:
+        event["confidence"] = round(clamp_confidence(confidence), 3)
+    if latency_ms is not None:
+        event["latency_ms"] = round(float(latency_ms), 2)
+    if tokens is not None:
+        event["tokens"] = max(0, int(tokens))
+    if messages is not None:
+        event["messages"] = max(0, int(messages))
+    return event
+
+
+def duration_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000
+
+
+def local_retrieval_confidence(
+    local_context: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    intent: dict[str, Any],
+) -> float:
+    if not local_context:
+        return 0.1
+    local_ids = {email["id"] for email in local_context}
+    matched_ids = {email["id"] for email in matched}
+    if matched_ids and matched_ids.issubset(local_ids):
+        return 0.96 if intent.get("direct_lookup") or intent.get("targeted_lookup") else 0.9
+    if matched_ids:
+        return 0.52
+    if intent.get("categories") or intent.get("deadline_focus") or intent.get("revenue_focus"):
+        return 0.78
+    return 0.68
+
+
+def inferred_output_confidence(
+    output: InboxProviderOutput,
+    prompt: str,
+    intent: dict[str, Any],
+    matched: list[dict[str, Any]],
+) -> float:
+    validation = validate_cascade_attempt(output, prompt, intent, matched, confidence_threshold=0)
+    return clamp_confidence(0.35 + 0.6 * validation["check_ratio"])
+
+
+def validate_cascade_attempt(
+    output: InboxProviderOutput,
+    prompt: str,
+    intent: dict[str, Any],
+    matched: list[dict[str, Any]],
+    confidence_threshold: float,
+) -> dict[str, Any]:
+    del prompt
+    confidence = clamp_confidence(output.confidence)
+    if output.error:
+        return {
+            "accepted": False,
+            "confidence": confidence,
+            "check_ratio": 0.0,
+            "failed_reasons": ["provider_unavailable"],
+            "completion": provider_error_completion(output.error),
+            "selected_count": 0,
+        }
+    selected, drafts, _, answer = normalized_output_parts(output, intent)
+    completion = evaluate_completion(selected, matched, drafts, intent, answer)
+    total_checks = max(1, int(completion["total_checks"]))
+    check_ratio = int(completion["passed_checks"]) / total_checks
+    failed_reasons = [check["label"] for check in completion["checks"] if not check["passed"]]
+    if confidence < confidence_threshold:
+        failed_reasons.append(f"confidence below {confidence_threshold:.2f}")
+    return {
+        "accepted": completion["state"] == "complete" and confidence >= confidence_threshold,
+        "confidence": confidence,
+        "check_ratio": check_ratio,
+        "failed_reasons": failed_reasons,
+        "completion": completion,
+        "selected_count": len(selected),
+    }
+
+
+def normalized_output_parts(
+    output: InboxProviderOutput,
+    intent: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, Any]], str]:
+    selected = selected_from_provider_output(output)
+    if not selected and output.answer:
+        selected = infer_selected_from_answer(output.answer)
+    drafts = sanitize_drafts(output.drafts) if intent["wants_reply"] else []
+    operations = sanitize_operations(output.operations, selected, intent) or mailbox_operations(selected, intent)
+    return selected, drafts, operations, output.answer.strip()
+
+
+def is_better_validation(current: dict[str, Any], previous: dict[str, Any] | None) -> bool:
+    if previous is None:
+        return True
+    current_score = current["check_ratio"] + current["confidence"]
+    previous_score = previous["check_ratio"] + previous["confidence"]
+    return current_score > previous_score
+
+
+def validation_detail(validation: dict[str, Any]) -> str:
+    completion = validation["completion"]
+    base = (
+        f"{completion['passed_checks']}/{completion['total_checks']} checks passed; "
+        f"confidence {validation['confidence']:.2f}."
+    )
+    if validation["accepted"]:
+        return base + " Accepted."
+    return base + f" Needs {failure_summary(validation)}."
+
+
+def failure_summary(validation: dict[str, Any]) -> str:
+    reasons = validation.get("failed_reasons") or ["review"]
+    return ", ".join(str(reason) for reason in reasons[:3])
+
+
+def retry_prompt(prompt: str, validation: dict[str, Any]) -> str:
+    return (
+        prompt
+        + "\n\nRetry/replan instruction: the previous local answer did not pass validation because "
+        + failure_summary(validation)
+        + ". Re-check the supplied mailbox, cite the exact supporting email ids, produce a direct answer, "
+        + "and set confidence only as high as the evidence allows."
+    )
+
+
+def expanded_inbox_context(
+    prompt: str,
+    intent: dict[str, Any],
+    current_context: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = [(score_email(email, prompt, intent), email) for email in SYNTHETIC_INBOX]
+    if intent["wants_archive"]:
+        candidates = [(archive_score(email, prompt), email) for email in SYNTHETIC_INBOX]
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    current_count = len(current_context)
+    target_count = max(
+        current_count + 4,
+        selection_count(intent),
+        int(os.getenv("INBOX_OLLAMA_RETRY_CONTEXT_EMAILS", "14")),
+    )
+    return [email for score, email in candidates if score > 0][: min(target_count, len(SYNTHETIC_INBOX))]
+
+
+def model_call_detail(output: InboxProviderOutput) -> str:
+    if output.error:
+        return output.error
+    return f"Called {output.provider} model {output.model}."
+
+
+def cascade_output(
+    output: InboxProviderOutput,
+    *,
+    model: str,
+    route_events: list[dict[str, Any]],
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    messages_sent_to_model: int,
+) -> InboxProviderOutput:
+    raw_payload = {
+        "final_provider": output.provider,
+        "final_model": output.model,
+        "raw_response": output.raw,
+        "route_events": route_events,
+    }
+    return InboxProviderOutput(
+        provider="cascade",
+        model=model,
+        selected_email_ids=output.selected_email_ids,
+        answer=output.answer,
+        drafts=output.drafts,
+        operations=output.operations,
+        raw=json.dumps(raw_payload, ensure_ascii=True),
+        input_tokens=max(0, int(input_tokens or 0)),
+        output_tokens=max(0, int(output_tokens or 0)),
+        error=output.error,
+        confidence=clamp_confidence(output.confidence),
+        cost_usd=cost_usd,
+        route_events=route_events,
+        messages_sent_to_model=messages_sent_to_model,
+    )
 
 
 def build_inbox_providers(
@@ -936,10 +1362,12 @@ def build_inbox_providers(
     provider_keys = provider_keys or {}
     openai_key = provider_keys.get("openai") or (os.getenv("OPENAI_API_KEY") if allow_server_keys else None)
     claude_key = provider_keys.get("claude") or (os.getenv("ANTHROPIC_API_KEY") if allow_server_keys else None)
+    openai = OpenAIInboxProvider(api_key=openai_key)
+    claude = AnthropicInboxProvider(api_key=claude_key)
     return {
-        "cascade": OllamaInboxProvider(),
-        "openai": OpenAIInboxProvider(api_key=openai_key),
-        "claude": AnthropicInboxProvider(api_key=claude_key),
+        "cascade": InboxCascadeProvider(OllamaInboxProvider(), [openai, claude]),
+        "openai": openai,
+        "claude": claude,
     }
 
 
@@ -1124,6 +1552,7 @@ def provider_output_from_payload(
         raw=raw,
         input_tokens=max(0, int(input_tokens or 0)),
         output_tokens=max(0, int(output_tokens or 0)),
+        confidence=clamp_confidence(payload.get("confidence"), 0.72),
     )
 
 
@@ -1137,7 +1566,16 @@ def unavailable_output(provider: str, model: str, message: str, raw: str = "") -
         operations=[],
         raw=raw or message,
         error=message,
+        confidence=0.0,
     )
+
+
+def clamp_confidence(value: Any, default: float = 0.0) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = default
+    return max(0.0, min(1.0, confidence))
 
 
 def coerce_answer(value: Any, selected_ids: list[str]) -> str:
@@ -1428,6 +1866,20 @@ def action_trace(
     intent: dict[str, Any],
     output: InboxProviderOutput | None = None,
 ) -> list[dict[str, Any]]:
+    if output and output.route_events:
+        return [
+            {
+                "step": index,
+                "route": event.get("route", "unknown"),
+                "label": event.get("label", "Route event"),
+                "detail": event.get("detail", ""),
+                "confidence": event.get("confidence"),
+                "latency_ms": event.get("latency_ms"),
+                "tokens": event.get("tokens"),
+                "messages": event.get("messages"),
+            }
+            for index, event in enumerate(output.route_events, start=1)
+        ]
     profile = AGENTS[agent_id]
     actions = []
     for index, label in enumerate(profile["route"], start=1):
@@ -1526,6 +1978,14 @@ def evaluate_completion(
                 "detail": f"Expected {len(matched_ids)} target email{'s' if len(matched_ids) != 1 else ''}.",
             }
         )
+        if intent.get("direct_lookup") or intent.get("targeted_lookup"):
+            checks.append(
+                {
+                    "label": "Avoided unrelated emails",
+                    "passed": selected_ids.issubset(matched_ids),
+                    "detail": "Direct lookups should cite only the requested sender or message.",
+                }
+            )
     if intent["wants_reply"]:
         needed = len([email for email in selected if email["needs_response"]])
         checks.append(
