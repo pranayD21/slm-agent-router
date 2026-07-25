@@ -16,12 +16,12 @@ AGENTS: dict[str, dict[str, Any]] = {
         "route": ["Local retrieval", "Ollama plan", "Validate plan", "Compose or synthesize"],
     },
     "openai": {
-        "label": "OpenAI Agent",
+        "label": "OpenAI",
         "model": os.getenv("OPENAI_MODEL", "gpt-5.6-sol"),
         "route": ["Send inbox to OpenAI", "Receive structured answer", "Validate answer", "Prepare actions"],
     },
     "claude": {
-        "label": "Claude Agent",
+        "label": "Claude",
         "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
         "route": ["Send inbox to Claude", "Receive structured answer", "Validate answer", "Prepare actions"],
     },
@@ -2314,31 +2314,38 @@ def provider_price_per_mtok(agent_id: str, model: str) -> tuple[float, float]:
 
 def compose_answer(agent_id: str, prompt: str, intent: dict[str, Any], selected: list[dict[str, Any]]) -> str:
     if not selected:
-        return f"No matching emails were found for: {prompt}"
+        return f'I could not find any emails matching "{prompt}".'
     if intent.get("direct_lookup"):
         return direct_lookup_answer(selected)
     if intent["wants_archive"]:
         bullets = [
-            f"{email['from_name']} - {email['subject']}: {message_summary(email)} Low action pressure; {email['expected_action']}"
+            f"**{email['from_name']}** — {email['subject']}: {message_summary(email)}"
             for email in selected
         ]
-        return "Safe archive candidates:\n" + "\n".join(f"- {bullet}" for bullet in bullets)
-    heading = "Draft-ready messages:" if intent["wants_reply"] else "Relevant inbox summary:"
-    if agent_id == "cascade":
-        heading = "Fast inbox pass:"
+        return "These can be safely archived — none of them need a reply:\n" + "\n".join(f"- {bullet}" for bullet in bullets)
+    if intent["wants_reply"]:
+        heading = "Here are the emails I drafted replies for:"
+    elif agent_id == "cascade":
+        heading = "Here is a quick pass over what needs your attention:"
     elif agent_id == "openai":
-        heading = "Task answer:"
+        heading = "Here is what I found:"
     else:
-        bullets = [
-            f"{email['from_name']} - {email['subject']}: {message_summary(email)} Action: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
-            for email in selected
-        ]
-        return "Contextual inbox answer:\n" + "\n".join(f"- {bullet}" for bullet in bullets)
-    bullets = [
-        f"{email['from_name']} - {email['subject']}: {message_summary(email)} Action: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
-        for email in selected
-    ]
+        heading = "Here is a rundown of the relevant emails:"
+    bullets = [summary_bullet(email) for email in selected]
     return heading + "\n" + "\n".join(f"- {bullet}" for bullet in bullets)
+
+
+def summary_bullet(email: dict[str, Any]) -> str:
+    bullet = f"**{email['from_name']}** — {email['subject']}: {message_summary(email)}"
+    bullet += f" Next step: {action_phrase(email)}."
+    if email.get("deadline"):
+        bullet += f" Due {email['deadline']}."
+    return bullet
+
+
+def action_phrase(email: dict[str, Any]) -> str:
+    action = str(email["expected_action"]).strip().rstrip(".")
+    return action[:1].lower() + action[1:] if action else "follow up"
 
 
 def compose_drafts(agent_id: str, selected: list[dict[str, Any]], intent: dict[str, Any]) -> list[dict[str, str]]:
@@ -2347,12 +2354,14 @@ def compose_drafts(agent_id: str, selected: list[dict[str, Any]], intent: dict[s
     drafts = []
     max_drafts = intent["count"]
     for email in [item for item in selected if item["needs_response"]][:max_drafts]:
+        first = first_name(email["from_name"])
+        action = action_phrase(email)
         if agent_id == "cascade":
-            body = f"Hi {first_name(email['from_name'])}, thanks for the note. I am on this and will follow up with {email['expected_action'].lower()} Please treat this as acknowledged while I confirm the final details."
+            body = f"Hi {first},\n\nThanks for the note — I'm on it. I'll {action} and follow up shortly with the details.\n\nBest"
         elif agent_id == "openai":
-            body = f"Hi {first_name(email['from_name'])}, thanks for flagging this. I will take the next step now: {email['expected_action']} I will send the relevant materials or decision shortly and keep the timeline in mind."
+            body = f"Hi {first},\n\nThanks for flagging this. I'll {action} and send over the relevant materials or decision shortly.\n\nBest"
         else:
-            body = f"Hi {first_name(email['from_name'])}, thank you for the context. I agree this needs a timely response. My next step is to {email['expected_action'].lower()} I will make sure the reply is clear, concrete, and aligned with the deadline."
+            body = f"Hi {first},\n\nThank you for the context — agreed this needs a timely response. My next step is to {action}, and I'll make sure it lands within the deadline.\n\nBest"
         drafts.append({"to": email["from_email"], "subject": "Re: " + email["subject"], "body": body})
     return drafts
 
@@ -2664,12 +2673,13 @@ def prompt_match_score(email: dict[str, Any], terms: list[str]) -> float:
 def direct_lookup_answer(selected: list[dict[str, Any]]) -> str:
     lines = []
     for email in selected:
-        deadline = f" Deadline: {email['deadline']}." if email.get("deadline") else ""
-        action = str(email["expected_action"]).rstrip(".")
-        lines.append(
-            f"- {email['from_name']} said: {message_summary(email)} Action needed: {action}.{deadline}"
-        )
-    return "\n".join(lines)
+        line = f'**{email["from_name"]}** said, in "{email["subject"]}": {message_summary(email)}'
+        if email.get("deadline"):
+            line += f" They need an answer by {email['deadline'].lower()}."
+        lines.append(line)
+    if len(lines) == 1:
+        return lines[0]
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def message_summary(email: dict[str, Any]) -> str:

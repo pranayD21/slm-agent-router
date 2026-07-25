@@ -1,0 +1,12 @@
+# Render blueprint — connect the repo at https://render.com/deploy
+services:
+  - type: web
+    name: slm-mail
+    runtime: docker
+    plan: standard
+    healthCheckPath: /api/config
+    envVars:
+      - key: SLM_ROUTER_ALLOW_SERVER_KEYS
+        value: "true"
+      - key: SLM_ROUTER_RUNS_PER_HOUR
+        value: "20"

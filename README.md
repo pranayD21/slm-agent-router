@@ -2,7 +2,24 @@
 
 `slm-agent-router` is a small-model-first agent-step router. A local model attempts planning, tool choice, tool arguments, repair, and final formatting first. The router escalates to a fallback model when confidence is low, JSON/schema validation fails, tool arguments are invalid, a verifier disagrees, or local retries are exhausted.
 
-## Quickstart
+It ships with **SLM Mail**, a Gmail-modeled web UI: a synthetic executive inbox on the left, a reading pane in the middle, and an agent side panel (in the style of Gmail's Gemini panel) where one prompt runs the SLM cascade, OpenAI, and Claude side by side so you can compare answers, speed, and cost. The UI is fully responsive and works on phones.
+
+## Quickstart (web UI)
+
+Requires Python 3.10+.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[web]"
+slm-router serve --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000`. The inbox, search, labels, star/archive/read actions, and the agent panel all work immediately. For live agent answers, connect at least one model:
+
+- **Local cascade (free):** `brew install ollama && brew services start ollama && ollama pull llama3.2:1b`
+- **OpenAI / Claude:** export `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` before `slm-router serve`, or paste keys in the UI under Settings (held in memory, sent only with each run).
+
+## Quickstart (CLI benchmark)
 
 ```bash
 python3 -m pip install -e .
@@ -109,7 +126,14 @@ python3 scripts/tune_cascade.py --epochs 20 --timeout 60 --output benchmark_runs
 
 ## Public deployment
 
-The browser benchmark needs a server that can run Playwright. Deploy it on a Docker-capable host such as Fly.io, Render, Railway, or a VM:
+**Instant public URL (from your machine):** serve locally, then tunnel. Anyone — including phones — can use the app at the printed `https://….trycloudflare.com` URL with zero accounts:
+
+```bash
+slm-router serve --host 127.0.0.1 --port 8000
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+**Permanent hosting:** the browser benchmark needs a server that can run Playwright, so deploy the Docker image on a Docker-capable host. The repo includes ready configs for Fly.io (`fly.toml` — run `flyctl launch --copy-config --now`) and Render (`render.yaml`), or run it anywhere with Docker:
 
 ```bash
 docker build -t slm-agent-router .
@@ -118,6 +142,8 @@ docker run -p 8000:8000 \
   -e ANTHROPIC_API_KEY="..." \
   slm-agent-router
 ```
+
+Hosted deployments have no local Ollama, so either set `OLLAMA_BASE_URL` to a reachable Ollama server or provide cloud keys (server-side, or let visitors paste their own in Settings). Without any model connected the mailbox UI still works fully; agent cards are marked "Not connected" instead of showing simulated output.
 
 Public-use controls:
 
