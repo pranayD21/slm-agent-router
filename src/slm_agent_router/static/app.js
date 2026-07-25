@@ -12,6 +12,7 @@ const resultsNode = document.querySelector("#agent-results");
 const summaryNode = document.querySelector("#run-summary");
 const historyNode = document.querySelector("#run-history");
 const total = document.querySelector("#run-total");
+const mailCountNode = document.querySelector("#mail-count");
 
 const agentLabels = {
   cascade: "SLM Cascade",
@@ -48,6 +49,7 @@ function renderInbox() {
   renderFilters();
   renderEmailList();
   renderEmailDetail();
+  if (mailCountNode) mailCountNode.textContent = `${filteredEmails().length} of ${state.emails.length} messages`;
 }
 
 function renderMetrics() {

@@ -7,56 +7,64 @@
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <main class="app-shell inbox-app">
-      <header class="topbar inbox-topbar">
-        <div class="brand-lockup">
+    <main class="gmail-app">
+      <header class="gmail-topbar">
+        <div class="gmail-brand">
           <div class="brand-mark" aria-hidden="true">SLM</div>
           <div>
-            <p class="eyebrow">Inbox manager agent comparison</p>
-            <h1>SLM Cascade Inbox Lab</h1>
-            <p class="subtitle">Ask three agents to triage, summarize, and draft replies against the same synthetic mailbox.</p>
+            <p class="eyebrow">Inbox manager comparison</p>
+            <h1>Inbox Lab</h1>
           </div>
         </div>
+        <label class="gmail-search">
+          <span>Search mailbox</span>
+          <input id="mail-search" type="search" placeholder="Search mail">
+        </label>
         <div class="run-total" id="run-total">Synthetic inbox</div>
       </header>
 
-      <section class="inbox-hero" aria-label="Inbox manager overview">
-        <div>
-          <p class="eyebrow">Synthetic executive inbox</p>
-          <h2>Compare SLM Cascade, OpenAI, and Claude on email management tasks</h2>
-          <p>Each prompt runs against a detailed inbox with deadlines, customer risk, investor asks, finance approvals, legal redlines, incidents, and low-priority noise. Results show time, token usage, cost, and evaluator effectiveness.</p>
-        </div>
-        <div class="inbox-metrics" id="inbox-metrics" aria-label="Mailbox metrics"></div>
-      </section>
-
-      <section class="inbox-layout">
-        <aside class="mailbox-panel" aria-label="Synthetic inbox">
-          <div class="mailbox-head">
-            <div>
-              <p class="eyebrow">Mailbox</p>
-              <h2>Inbox snapshot</h2>
-            </div>
-            <button id="reset-view" type="button">Reset</button>
+      <section class="gmail-main">
+        <aside class="gmail-sidebar" aria-label="Mailbox navigation">
+          <button class="compose-button" type="button">Agent Task</button>
+          <div class="gmail-sidebar-block">
+            <p class="eyebrow">Labels</p>
+            <div class="mail-filters" id="mail-filters" aria-label="Inbox filters"></div>
           </div>
-          <label class="mail-search">
-            <span>Search</span>
-            <input id="mail-search" type="search" placeholder="sender, subject, tag">
-          </label>
-          <div class="mail-filters" id="mail-filters" aria-label="Inbox filters"></div>
-          <div class="mail-list" id="mail-list"></div>
+          <div class="gmail-sidebar-block">
+            <div class="sidebar-head">
+              <p class="eyebrow">Mailbox</p>
+              <button id="reset-view" type="button">Reset</button>
+            </div>
+            <div class="inbox-metrics" id="inbox-metrics" aria-label="Mailbox metrics"></div>
+          </div>
         </aside>
 
-        <section class="workspace-panel" aria-label="Agent prompt workspace">
-          <section class="email-detail" id="email-detail" aria-label="Selected email"></section>
+        <section class="mail-workspace" aria-label="Synthetic inbox">
+          <section class="mail-list-panel" aria-label="Email list">
+            <div class="mail-list-toolbar">
+              <div>
+                <p class="eyebrow">Synthetic executive inbox</p>
+                <h2>Inbox</h2>
+              </div>
+              <span id="mail-count">Loading</span>
+            </div>
+            <div class="mail-list" id="mail-list"></div>
+          </section>
 
+          <section class="reading-pane" aria-label="Selected email">
+            <section class="email-detail" id="email-detail"></section>
+          </section>
+        </section>
+
+        <aside class="assistant-dock" aria-label="Agent chat prompting">
           <section class="composer-panel" aria-label="Agent chat prompt">
             <div class="composer-head">
               <div>
-                <p class="eyebrow">Chat with all agents</p>
-                <h2>Send one inbox task to all three agents</h2>
+                <p class="eyebrow">Agent chat</p>
+                <h2>Ask all three agents</h2>
               </div>
               <div class="agent-key">
-                <span class="route-chip slm">SLM Cascade</span>
+                <span class="route-chip slm">SLM</span>
                 <span class="route-chip llm">OpenAI</span>
                 <span class="route-chip safety">Claude</span>
               </div>
@@ -64,10 +72,10 @@
             <div class="prompt-chips" id="prompt-chips"></div>
             <label class="prompt-field">
               <span>Prompt</span>
-              <textarea id="inbox-prompt" rows="4">Summarize the most important emails I need to respond to today.</textarea>
+              <textarea id="inbox-prompt" rows="5">Summarize the most important emails I need to respond to today.</textarea>
             </label>
             <div class="composer-actions">
-              <button id="run-inbox" type="button">Run inbox agents</button>
+              <button id="run-inbox" type="button">Run agents</button>
               <div class="composer-status" id="composer-status">Ready</div>
             </div>
           </section>
@@ -76,12 +84,12 @@
           <section class="agent-results" id="agent-results" aria-label="Agent comparison results"></section>
           <section class="history-panel" aria-label="Prompt history">
             <div class="trace-head">
-              <h2>Prompt History</h2>
-              <p>Each run is kept locally in this browser session.</p>
+              <h2>History</h2>
+              <p>Local session</p>
             </div>
             <div id="run-history" class="run-history"></div>
           </section>
-        </section>
+        </aside>
       </section>
     </main>
     <script src="/static/app.js" defer></script>
