@@ -359,6 +359,16 @@ class WebBenchmarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(result["effectiveness"], 1)
             self.assertGreaterEqual(len(result["selected_emails"]), 1)
 
+    async def test_inbox_direct_sender_prompt_returns_matching_summary(self):
+        run = await run_inbox_comparison("what did nora say")
+        self.assertEqual(["E-1005"], [email["id"] for email in run["truth"]])
+        for result in run["results"]:
+            self.assertEqual(["E-1005"], [email["id"] for email in result["selected_emails"]])
+            answer = result["answer"].lower()
+            self.assertIn("summit bank", answer)
+            self.assertIn("liability", answer)
+            self.assertIn("uncapped", answer)
+
     async def test_inbox_reply_prompt_creates_drafts(self):
         run = await run_inbox_comparison("Draft replies to the 3 highest priority customer emails.")
         for result in run["results"]:

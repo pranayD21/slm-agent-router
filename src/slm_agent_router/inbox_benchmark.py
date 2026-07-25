@@ -628,6 +628,8 @@ def analyze_prompt(prompt: str) -> dict[str, Any]:
     wants_reply = any(term in text for term in ["respond", "reply", "draft", "answer", "send"])
     wants_archive = any(term in text for term in ["archive", "ignore", "low priority", "safe to ignore"])
     wants_summary = any(term in text for term in ["summarize", "summary", "brief", "important", "prioritize"])
+    terms = prompt_terms(prompt)
+    target_matches = target_email_matches(prompt, terms)
     categories = [category for category in sorted({email["category"].lower() for email in SYNTHETIC_INBOX}) if category.lower() in text]
     if "customer" in text and "Customer" not in categories:
         categories.append("customer")
@@ -635,12 +637,19 @@ def analyze_prompt(prompt: str) -> dict[str, Any]:
         categories.append("sales")
     if "investor" in text and "Investor" not in categories:
         categories.append("investor")
+    question_lookup = is_direct_lookup_prompt(text)
     return {
         "count": max(1, min(count, 12)),
+        "explicit_count": number_match is not None,
         "wants_reply": wants_reply,
         "wants_archive": wants_archive,
         "wants_summary": wants_summary or not wants_reply,
         "categories": sorted(set(categories)),
+        "prompt_terms": terms,
+        "direct_lookup": question_lookup or bool(target_matches["ids"] and not wants_reply),
+        "targeted_lookup": bool(target_matches["ids"]),
+        "target_email_ids": target_matches["ids"],
+        "matched_people": target_matches["people"],
         "deadline_focus": any(term in text for term in ["today", "deadline", "urgent", "important", "critical"]),
         "revenue_focus": any(term in text for term in ["revenue", "sales", "customer", "churn", "renewal", "pilot", "deal"]),
     }
@@ -650,31 +659,28 @@ def select_emails(prompt: str, intent: dict[str, Any], agent_id: str) -> list[di
     scored = [(score_email(email, prompt, intent), email) for email in SYNTHETIC_INBOX]
     if intent["wants_archive"]:
         scored = [(archive_score(email, prompt), email) for email in SYNTHETIC_INBOX]
+    target_ids = set(intent.get("target_email_ids", []))
+    if target_ids and not intent["wants_archive"]:
+        scored = [item for item in scored if item[1]["id"] in target_ids]
     scored.sort(key=lambda item: item[0], reverse=True)
     profile = AGENTS.get(agent_id, {"coverage_bias": 0})
-    count = intent["count"]
-    if agent_id == "cascade" and not intent["wants_archive"]:
+    count = selection_count(intent)
+    if agent_id == "cascade" and not intent["wants_archive"] and not intent.get("targeted_lookup"):
         count = max(3, count + int(profile["coverage_bias"]))
-    elif agent_id in {"openai", "claude"} and not intent["wants_archive"]:
+    elif agent_id in {"openai", "claude"} and not intent["wants_archive"] and not intent.get("targeted_lookup"):
         count = min(10, count + int(profile["coverage_bias"]))
     elif agent_id == "evaluator":
-        count = intent["count"]
+        count = selection_count(intent)
     return [email for score, email in scored if score > 0][:count]
 
 
 def score_email(email: dict[str, Any], prompt: str, intent: dict[str, Any]) -> float:
-    text = " ".join(
-        [
-            email["subject"],
-            email["body"],
-            email["from_name"],
-            email["role"],
-            email["category"],
-            " ".join(email["tags"]),
-        ]
-    ).lower()
-    prompt_terms = [term for term in re.findall(r"[a-zA-Z]{4,}", prompt.lower()) if term not in STOPWORDS]
-    score = float(email["priority"])
+    del prompt
+    target_ids = set(intent.get("target_email_ids", []))
+    direct_lookup = bool(intent.get("direct_lookup") or intent.get("targeted_lookup"))
+    score = float(email["priority"]) * (0.18 if direct_lookup else 1.0)
+    if email["id"] in target_ids:
+        score += 520
     if email["needs_response"]:
         score += 18
     if email["urgency"] == "critical":
@@ -689,7 +695,10 @@ def score_email(email: dict[str, Any], prompt: str, intent: dict[str, Any]) -> f
         score += 22
     if intent["wants_reply"] and email["needs_response"]:
         score += 24
-    score += sum(8 for term in prompt_terms if term in text)
+    term_score = prompt_match_score(email, intent.get("prompt_terms", []))
+    score += term_score
+    if direct_lookup and term_score <= 0 and email["id"] not in target_ids and not intent["categories"]:
+        score -= 120
     if intent["categories"] and email["category"].lower() not in intent["categories"]:
         score -= 35
     if intent["wants_reply"] and not email["needs_response"]:
@@ -714,11 +723,18 @@ def compose_answer(agent_id: str, prompt: str, intent: dict[str, Any], selected:
         "openai": "I reviewed the inbox broadly and ranked messages by urgency, business impact, and response need.",
         "claude": "I grouped the inbox by consequence and drafted responses with context, tone, and owner handoff in mind.",
     }[agent_id]
+    if not selected:
+        return f"{lead}\nNo matching emails were found for: {prompt}"
+    if intent.get("direct_lookup"):
+        return direct_lookup_answer(lead, selected)
     if intent["wants_archive"]:
-        bullets = [f"{email['from_name']} - {email['subject']}: low action pressure; {email['expected_action']}" for email in selected]
+        bullets = [
+            f"{email['from_name']} - {email['subject']}: {message_summary(email)} Low action pressure; {email['expected_action']}"
+            for email in selected
+        ]
     else:
         bullets = [
-            f"{email['from_name']} - {email['subject']}: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
+            f"{email['from_name']} - {email['subject']}: {message_summary(email)} Action: {email['expected_action']} Deadline: {email['deadline'] or 'none'}."
             for email in selected
         ]
     return lead + "\n" + "\n".join(f"- {bullet}" for bullet in bullets)
@@ -824,28 +840,139 @@ def first_name(name: str) -> str:
     return str(name).split()[0]
 
 
+def selection_count(intent: dict[str, Any]) -> int:
+    target_ids = intent.get("target_email_ids", [])
+    if target_ids and not intent.get("explicit_count"):
+        return len(target_ids)
+    if intent.get("direct_lookup") and not intent.get("explicit_count"):
+        return 3 if intent.get("categories") and not target_ids else max(1, min(intent["count"], 5))
+    return int(intent["count"])
+
+
+def prompt_terms(prompt: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in re.findall(r"[a-zA-Z][a-zA-Z0-9']{1,}", prompt.lower()):
+        normalized = term.strip("'")
+        if normalized.endswith("'s"):
+            normalized = normalized[:-2]
+        if len(normalized) < 3 or normalized in STOPWORDS or normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(normalized)
+    return terms
+
+
+def is_direct_lookup_prompt(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(what did|what does|what do|what was|what were|what is|what are|tell me what|who said|who asked)\b",
+            text,
+        )
+        or re.search(r"\b(say|says|said|ask|asks|asked|want|wants|wanted|mention|mentioned)\b", text)
+    )
+
+
+def target_email_matches(prompt: str, terms: list[str]) -> dict[str, list[str]]:
+    normalized_prompt = normalize_lookup_text(prompt)
+    term_set = set(terms)
+    ids: list[str] = []
+    people: list[str] = []
+    for email in SYNTHETIC_INBOX:
+        full_name = normalize_lookup_text(email["from_name"])
+        name_parts = [part for part in full_name.split() if len(part) > 2]
+        local_part = email["from_email"].split("@", 1)[0]
+        local_tokens = [part for part in re.split(r"[^a-zA-Z0-9]+", local_part.lower()) if len(part) > 2]
+        matched_full_name = bool(full_name and re.search(rf"\b{re.escape(full_name)}\b", normalized_prompt))
+        matched_token = any(part in term_set for part in name_parts + local_tokens)
+        if matched_full_name or matched_token:
+            ids.append(email["id"])
+            people.append(email["from_name"])
+    return {"ids": ids, "people": people}
+
+
+def normalize_lookup_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-zA-Z0-9]+", str(value).lower()))
+
+
+def prompt_match_score(email: dict[str, Any], terms: list[str]) -> float:
+    if not terms:
+        return 0
+    from_text = f"{email['from_name']} {email['from_email']}".lower()
+    subject_text = email["subject"].lower()
+    body_text = email["body"].lower()
+    meta_text = f"{email['role']} {email['category']} {' '.join(email['tags'])}".lower()
+    score = 0.0
+    for term in terms:
+        if term in from_text:
+            score += 110
+        if term in subject_text:
+            score += 42
+        if term in body_text:
+            score += 32
+        if term in meta_text:
+            score += 26
+    return score
+
+
+def direct_lookup_answer(lead: str, selected: list[dict[str, Any]]) -> str:
+    lines = []
+    for email in selected:
+        deadline = f" Deadline: {email['deadline']}." if email.get("deadline") else ""
+        action = str(email["expected_action"]).rstrip(".")
+        lines.append(
+            f"- {email['from_name']} said: {message_summary(email)} Action needed: {action}.{deadline}"
+        )
+    lines.append(f"Agent route note: {lead}")
+    return "\n".join(lines)
+
+
+def message_summary(email: dict[str, Any]) -> str:
+    body = " ".join(str(email["body"]).split())
+    return body if body.endswith((".", "!", "?")) else body + "."
+
+
 STOPWORDS = {
     "about",
     "after",
+    "agent",
+    "agents",
+    "asked",
+    "asks",
     "before",
     "could",
+    "did",
+    "does",
+    "doing",
     "draft",
     "email",
     "emails",
+    "from",
+    "give",
+    "have",
     "important",
     "inbox",
+    "into",
     "need",
     "needs",
     "please",
     "reply",
     "respond",
     "safe",
+    "say",
+    "said",
+    "says",
     "summarize",
     "summary",
     "that",
+    "tell",
     "this",
     "today",
     "what",
+    "when",
+    "where",
     "which",
     "with",
+    "want",
+    "wants",
 }
